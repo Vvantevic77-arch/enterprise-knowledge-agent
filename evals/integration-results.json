@@ -1,0 +1,41 @@
+{
+  "environment": {
+    "python": "3.12.14",
+    "platform": "macOS-15.6.1-arm64-arm-64bit"
+  },
+  "generated_at_utc": "2026-09-08T05:20:56.741685+00:00",
+  "probes": {
+    "network": {
+      "status": "passed",
+      "latency_ms": 1171.787,
+      "http_code": 200,
+      "url": "https://api.github.com"
+    },
+    "postgres": {
+      "status": "passed",
+      "latency_ms": 39.114,
+      "server_version": "16.15 (Debian 16.15-1.pgdg12+2)",
+      "pgvector_extension": true
+    },
+    "redis": {
+      "status": "passed",
+      "latency_ms": 5.207,
+      "url": "redis://localhost:6379/0"
+    },
+    "celery": {
+      "status": "passed",
+      "latency_ms": 56.338
+    },
+    "llm": {
+      "status": "passed",
+      "latency_ms": 1958.803,
+      "model": "deepseek-chat",
+      "provider": "deepseek",
+      "base_url": "https://api.deepseek.com",
+      "api_mode": "chat_completions",
+      "reasoning_effort": null,
+      "input_tokens": 11,
+      "output_tokens": 1
+    }
+  }
+}

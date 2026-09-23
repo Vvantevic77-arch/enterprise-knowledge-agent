@@ -1,0 +1,110 @@
+{
+  "environment": {
+    "python": "3.12.14",
+    "platform": "macOS-15.6.1-arm64-arm-64bit",
+    "seed": 20260906
+  },
+  "dataset": {
+    "documents": 240,
+    "chunks": 960,
+    "chunk_size": 420,
+    "chunk_overlap": 60
+  },
+  "chunking": {
+    "documents": 240,
+    "chunks": 960,
+    "elapsed_ms": 5.138,
+    "documents_per_second": 46710.03,
+    "mb_per_second": 62.88
+  },
+  "incremental_index": {
+    "initial_documents": 240,
+    "initial_chunks": 960,
+    "duplicate_documents": 240,
+    "duplicate_zero_ops": 240,
+    "duplicate_zero_op_rate": 1.0,
+    "updated_documents": 24,
+    "updated_chunks_rewritten": 96,
+    "full_rebuild_chunks_baseline": 960,
+    "reindex_work_reduction": 0.9
+  },
+  "retrieval": {
+    "queries": 240,
+    "indexed_chunks": 960,
+    "recall_at_1": 0.6542,
+    "recall_at_3": 0.8167,
+    "recall_at_5": 0.8625,
+    "recall_at_10": 0.9125,
+    "mrr": 0.7488,
+    "mean_first_hit_rank": 7.429
+  },
+  "retrieval_modes": {
+    "vector_only": {
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0292,
+      "recall_at_10": 0.0458,
+      "mrr": 0.025,
+      "recall_at_5_delta_vs_hybrid": 0.8333
+    },
+    "lexical_only": {
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "recall_at_5_delta_vs_hybrid": -0.1375
+    },
+    "hybrid": {
+      "recall_at_1": 0.6542,
+      "recall_at_5": 0.8625,
+      "recall_at_10": 0.9125,
+      "mrr": 0.7488,
+      "recall_at_5_delta_vs_hybrid": 0.0
+    }
+  },
+  "search_ab": {
+    "queries": 40,
+    "baseline_p50_ms": 46.014,
+    "baseline_p95_ms": 46.736,
+    "optimized_p50_ms": 32.125,
+    "optimized_p95_ms": 32.809,
+    "p95_latency_reduction": 0.298,
+    "baseline_throughput_requests_per_second": 21.48,
+    "optimized_throughput_requests_per_second": 31.07,
+    "throughput_improvement": 0.4462
+  },
+  "policy": {
+    "safe_prompts": 240,
+    "ticket_prompts": 240,
+    "ticket_precision": 1.0,
+    "ticket_recall": 1.0,
+    "safe_prompt_false_positive_rate": 0.0,
+    "approval_gate_coverage": 1.0
+  },
+  "concurrency": {
+    "requests_per_level": 40,
+    "levels": {
+      "1": {
+        "requests": 40,
+        "p50_ms": 32.122,
+        "p95_ms": 33.511,
+        "p99_ms": 35.443,
+        "throughput_requests_per_second": 30.92
+      },
+      "10": {
+        "requests": 40,
+        "p50_ms": 164.058,
+        "p95_ms": 428.982,
+        "p99_ms": 550.299,
+        "throughput_requests_per_second": 30.75
+      },
+      "50": {
+        "requests": 40,
+        "p50_ms": 113.401,
+        "p95_ms": 205.485,
+        "p99_ms": 242.614,
+        "throughput_requests_per_second": 30.93
+      }
+    }
+  },
+  "generated_at_utc": "2026-09-07T13:07:18.863889+00:00"
+}

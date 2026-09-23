@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f4f2ed" />
+    <title>Payment Operations Workspace</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <svg class="icon-sprite" aria-hidden="true" focusable="false">
+      <symbol id="icon-mark" viewBox="0 0 24 24"><path d="M5 16.5 12 5l7 11.5"/><path d="M8.5 16.5h7"/><path d="M12 5v11.5"/></symbol>
+      <symbol id="icon-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></symbol>
+      <symbol id="icon-book" viewBox="0 0 24 24"><path d="M5 4.5h10a4 4 0 0 1 4 4v11H9a4 4 0 0 0-4 0v-15Z"/><path d="M9 19.5V8.5a4 4 0 0 1 4-4"/></symbol>
+      <symbol id="icon-spark" viewBox="0 0 24 24"><path d="m12 3 1.5 6.5L20 11l-6.5 1.5L12 19l-1.5-6.5L4 11l6.5-1.5L12 3Z"/><path d="m19 17 .5 2.5L22 20l-2.5.5L19 23l-.5-2.5L16 20l2.5-.5L19 17Z"/></symbol>
+      <symbol id="icon-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="m8.5 12 2.3 2.3 4.8-5"/></symbol>
+      <symbol id="icon-ticket" viewBox="0 0 24 24"><path d="M5 6.5h14v4a2 2 0 0 0 0 3v4H5v-4a2 2 0 0 0 0-3v-4Z"/><path d="M10 9.5h5M10 14.5h3"/></symbol>
+      <symbol id="icon-users" viewBox="0 0 24 24"><circle cx="9" cy="9" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><path d="M15 6.5a3 3 0 0 1 0 5.8M16 15a4.5 4.5 0 0 1 4.5 4"/></symbol>
+      <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M19 8.5A7.5 7.5 0 0 0 5.5 7L4 9"/><path d="M4 5v4h4"/><path d="M5 15.5A7.5 7.5 0 0 0 18.5 17L20 15"/><path d="M20 19v-4h-4"/></symbol>
+      <symbol id="icon-switch" viewBox="0 0 24 24"><path d="M8 7h11l-3-3M19 7l-3 3"/><path d="M16 17H5l3 3M5 17l3-3"/></symbol>
+      <symbol id="icon-arrow" viewBox="0 0 24 24"><path d="M6 18 18 6"/><path d="M9 6h9v9"/></symbol>
+      <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+      <symbol id="icon-upload" viewBox="0 0 24 24"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M5 14v5h14v-5"/></symbol>
+      <symbol id="icon-link" viewBox="0 0 24 24"><path d="m9.5 14.5 5-5"/><path d="M7 17H5.5A3.5 3.5 0 0 1 2 13.5v0A3.5 3.5 0 0 1 5.5 10H9"/><path d="M15 7h3.5a3.5 3.5 0 0 1 0 7H15"/></symbol>
+      <symbol id="icon-send" viewBox="0 0 24 24"><path d="m4 4 16 8-16 8 3-8-3-8Z"/><path d="M7 12h13"/></symbol>
+    </svg>
+    <div id="toast-region" class="toast-region" aria-live="polite"></div>
+
+    <div id="onboarding" class="modal-backdrop hidden">
+      <section class="onboarding modal-panel" aria-labelledby="onboarding-title">
+        <div class="brand-mark"><svg class="icon" aria-hidden="true"><use href="#icon-mark"></use></svg></div>
+        <p class="eyebrow">Payment operations</p>
+        <h1 id="onboarding-title">登录到工作区</h1>
+        <p class="muted" id="auth-subtitle">用邮箱和密码进入你的商户组织，管理知识库、Agent 运行、审批与工单。</p>
+        <form id="auth-form" class="stack-form">
+          <label id="auth-name-field" class="hidden">Display name<input id="auth-name" name="display_name" maxlength="120" placeholder="Operations teammate" /></label>
+          <label>Email<input id="auth-email" name="email" type="email" required autocomplete="username" placeholder="ops@acme-payments.com" /></label>
+          <label>Password<input id="auth-password" name="password" type="password" required minlength="8" autocomplete="current-password" placeholder="At least 8 characters" /></label>
+          <label id="auth-org-field" class="hidden">Organization name<input id="auth-org" name="organization_name" minlength="2" maxlength="160" placeholder="Acme Payments" /></label>
+          <button id="auth-submit" class="button primary" type="submit">Sign in</button>
+        </form>
+        <div class="divider"><span>or</span></div>
+        <button id="auth-toggle" class="auth-toggle" type="button">还没有账号？注册新工作区</button>
+      </section>
+    </div>
+
+    <div id="workspace" class="app-shell hidden">
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <div class="brand-mark"><svg class="icon" aria-hidden="true"><use href="#icon-mark"></use></svg></div>
+          <div><strong>Ops workspace</strong><span>Merchant intelligence</span></div>
+        </div>
+        <div class="workspace-switcher">
+          <span class="label">CURRENT ORGANIZATION</span>
+          <button id="workspace-name" class="workspace-button" type="button">Loading...</button>
+          <span id="workspace-role" class="role-pill">member</span>
+        </div>
+        <nav id="main-nav" class="main-nav" aria-label="Primary navigation">
+          <button class="nav-item active" data-view="overview" type="button"><svg class="icon nav-icon" aria-hidden="true"><use href="#icon-grid"></use></svg>Overview</button>
+          <button class="nav-item" data-view="knowledge" type="button"><svg class="icon nav-icon" aria-hidden="true"><use href="#icon-book"></use></svg>Knowledge bases</button>
+          <button class="nav-item" data-view="agent" type="button"><svg class="icon nav-icon" aria-hidden="true"><use href="#icon-spark"></use></svg>Agent workspace</button>
+          <button class="nav-item" data-view="approvals" type="button"><svg class="icon nav-icon" aria-hidden="true"><use href="#icon-check"></use></svg>Approvals <span id="approval-badge" class="nav-badge hidden">0</span></button>
+          <button class="nav-item" data-view="tickets" type="button"><svg class="icon nav-icon" aria-hidden="true"><use href="#icon-ticket"></use></svg>Tickets</button>
+          <button class="nav-item" data-view="team" type="button"><svg class="icon nav-icon" aria-hidden="true"><use href="#icon-users"></use></svg>Team</button>
+        </nav>
+        <div class="sidebar-footer">
+          <button id="refresh-all" class="text-button" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>Refresh workspace</button>
+          <button id="disconnect" class="text-button danger-text" type="button">Sign out</button>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="page-eyebrow">Operations control center</p>
+            <h2 id="page-title">Overview</h2>
+          </div>
+          <div class="topbar-actions">
+            <span id="connection-status" class="status-dot"><i></i>Connected</span>
+            <button id="user-menu" class="user-chip" type="button"><span id="user-avatar">D</span><span id="user-label">demo</span></button>
+          </div>
+        </header>
+
+        <div id="view-overview" class="view active-view">
+          <section class="hero-band">
+            <div><p class="eyebrow light-eyebrow">Payment operations intelligence</p><h3>Move from question to action.</h3><p>Ground every answer in your merchant runbooks, then route high-risk work through a clear approval path.</p></div>
+            <button class="button light-button" data-go="agent" type="button">Ask the operations agent <svg class="icon button-icon" aria-hidden="true"><use href="#icon-arrow"></use></svg></button>
+          </section>
+          <section class="stat-grid">
+            <article class="stat-card"><span class="stat-label">Knowledge bases</span><strong id="stat-kbs">—</strong><span class="stat-detail">Organization collections</span></article>
+            <article class="stat-card"><span class="stat-label">Pending approvals</span><strong id="stat-approvals">—</strong><span class="stat-detail">Awaiting reviewer action</span></article>
+            <article class="stat-card"><span class="stat-label">Open tickets</span><strong id="stat-tickets">—</strong><span class="stat-detail">Operational follow-up</span></article>
+            <article class="stat-card accent-card"><span class="stat-label">Workspace role</span><strong id="stat-role">—</strong><span class="stat-detail">Access level in this org</span></article>
+          </section>
+          <section class="two-column">
+            <article class="panel panel-large"><div class="panel-heading"><div><p class="eyebrow">Suggested next step</p><h3>Build a source of truth</h3></div><span class="panel-symbol">01</span></div><p class="panel-copy">Upload your integration, refund, settlement, and incident runbooks. The indexing worker will prepare them for grounded agent answers.</p><button class="button secondary" data-go="knowledge" type="button">Open knowledge bases <svg class="icon button-icon" aria-hidden="true"><use href="#icon-arrow"></use></svg></button></article>
+            <article class="panel"><div class="panel-heading"><div><p class="eyebrow">Workspace activity</p><h3 id="activity-title">Ready for work</h3></div><span class="live-status"><i></i>Live</span></div><div id="activity-list" class="activity-list"><p class="empty-state">Your latest approvals and tickets will appear here.</p></div></article>
+          </section>
+        </div>
+
+        <div id="view-knowledge" class="view">
+          <section class="section-toolbar"><div><p class="eyebrow">Organization library</p><h3>Knowledge bases</h3><p class="muted">Curate the documents your agent can use for merchant support and operations.</p></div><button id="new-kb-button" class="button primary" type="button"><svg class="icon button-icon" aria-hidden="true"><use href="#icon-plus"></use></svg>New knowledge base</button></section>
+          <div id="kb-grid" class="kb-grid"></div>
+          <section id="kb-detail" class="panel kb-detail hidden"><div class="panel-heading"><div><p class="eyebrow">Selected collection</p><h3 id="selected-kb-name">Knowledge base</h3></div><button id="close-kb-detail" class="icon-button" type="button" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg></button></div><p id="selected-kb-description" class="muted"></p><div class="upload-zone"><div><strong>Bring in a source</strong><p class="muted">Upload a PDF, HTML, Markdown, or text file, or index a public URL.</p></div><div class="upload-actions"><label class="button secondary file-button"><svg class="icon button-icon" aria-hidden="true"><use href="#icon-upload"></use></svg>Choose file<input id="document-file" type="file" accept=".pdf,.html,.htm,.md,.txt" /></label><button id="url-ingest-button" class="button tertiary" type="button"><svg class="icon button-icon" aria-hidden="true"><use href="#icon-link"></use></svg>Add URL</button></div></div><div id="document-status" class="inline-status"></div></section>
+        </div>
+
+        <div id="view-agent" class="view">
+          <section class="section-toolbar"><div><p class="eyebrow">Grounded assistance</p><h3>Agent workspace</h3><p class="muted">Ask a payment operations question. Answers use only the knowledge bases you select.</p></div><div class="toolbar-actions"><button id="demo-seed-button" class="button tertiary" type="button"><svg class="icon button-icon" aria-hidden="true"><use href="#icon-book"></use></svg>Prepare engineering runbooks</button><span class="run-chip">Async runs · traceable</span></div></section>
+          <section class="agent-layout"><article class="panel chat-panel"><div id="chat-messages" class="chat-messages"><div class="message assistant"><div class="message-avatar">AI</div><div><p class="message-meta">Operations agent</p><p>你好，我是运营智能助手。选择一个问题开始演示。</p><span class="message-hint">回答会基于工作区 runbook，并显示来源文件。</span><div class="prompt-suggestions" aria-label="Suggested questions"><button class="prompt-chip" type="button" data-prompt="退款多久到账？">退款多久到账？</button><button class="prompt-chip" type="button" data-prompt="支付接口 401 怎么排查？">支付接口 401 怎么排查？</button><button class="prompt-chip" type="button" data-prompt="创建一个高优先级工单">创建高优先级工单</button></div></div></div></div><form id="agent-form" class="agent-composer"><textarea id="agent-prompt" required maxlength="8000" rows="3" placeholder="询问退款、结算、支付接口，或请求创建工单..."></textarea><div class="composer-footer"><div id="kb-checks" class="kb-checks"></div><button class="button primary" type="submit">Run agent <svg class="icon button-icon" aria-hidden="true"><use href="#icon-send"></use></svg></button></div></form></article><aside class="panel agent-side"><p class="eyebrow">Run details</p><div id="run-details" class="run-details"><p class="empty-state">Your trace, retrieval count, and approval state will appear here after a run.</p></div></aside></section>
+        </div>
+
+        <div id="view-approvals" class="view"><section class="section-toolbar"><div><p class="eyebrow">Human in the loop</p><h3>Approvals</h3><p class="muted">Review high-risk actions before they change operational data.</p></div><button class="button secondary" data-refresh="approvals" type="button"><svg class="icon button-icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>Refresh</button></section><section class="panel table-panel"><div id="approvals-table" class="table-wrap"></div></section></div>
+        <div id="view-tickets" class="view"><section class="section-toolbar"><div><p class="eyebrow">Operational follow-up</p><h3>Tickets</h3><p class="muted">Track work created from approved agent actions.</p></div><button class="button secondary" data-refresh="tickets" type="button"><svg class="icon button-icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>Refresh</button></section><section class="panel table-panel"><div id="tickets-table" class="table-wrap"></div></section></div>
+        <div id="view-team" class="view"><section class="section-toolbar"><div><p class="eyebrow">Organization access</p><h3>Team</h3><p class="muted">Manage the people who can work in this merchant organization.</p></div></section><section class="team-layout"><article class="panel table-panel"><div id="members-table" class="table-wrap"></div></article><article id="member-form-panel" class="panel"><p class="eyebrow">Invite or update</p><h3>Add a teammate</h3><form id="member-form" class="stack-form"><label>Email<input name="email" type="email" required placeholder="ops@acme-payments.com" /></label><label>Display name<input name="display_name" required placeholder="Operations teammate" /></label><label>Password<input name="password" type="password" required minlength="8" placeholder="At least 8 characters" /></label><label>Role<select name="role"><option value="member">Member</option><option value="admin">Admin</option><option value="viewer">Viewer</option></select></label><button class="button primary" type="submit">Save teammate</button></form><p id="member-permission-note" class="muted small-text"></p></article></section></div>
+      </main>
+    </div>
+
+    <div id="kb-modal" class="modal-backdrop hidden"><section class="modal-panel"><div class="panel-heading"><div><p class="eyebrow">New collection</p><h3>Create knowledge base</h3></div><button class="icon-button close-modal" type="button" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg></button></div><form id="kb-form" class="stack-form"><label>Name<input name="name" required minlength="2" maxlength="160" placeholder="Refund and settlement runbooks" /></label><label>Description<textarea name="description" rows="3" placeholder="What belongs in this collection?"></textarea></label><button class="button primary" type="submit">Create knowledge base</button></form></section></div>
+    <div id="url-modal" class="modal-backdrop hidden"><section class="modal-panel"><div class="panel-heading"><div><p class="eyebrow">Knowledge source</p><h3>Index a public URL</h3></div><button class="icon-button close-modal" type="button" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg></button></div><form id="url-form" class="stack-form"><label>URL<input name="url" type="url" required placeholder="https://docs.example.com/refunds" /></label><button class="button primary" type="submit">Start indexing</button></form></section></div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

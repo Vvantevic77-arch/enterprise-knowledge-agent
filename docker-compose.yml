@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: agent
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+    ports: ["5432:5432"]
+    volumes: ["agent_pgdata:/var/lib/postgresql/data"]
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      PYTHONPATH: /app/backend
+    ports: ["8080:8080"]
+    depends_on:
+      - postgres
+      - redis
+
+  worker:
+    build: .
+    env_file: .env
+    environment:
+      PYTHONPATH: /app/backend
+    command: ["celery", "-A", "app.worker.celery_app.celery_app", "worker", "--loglevel=INFO"]
+    depends_on:
+      - postgres
+      - redis
+
+volumes:
+  agent_pgdata:

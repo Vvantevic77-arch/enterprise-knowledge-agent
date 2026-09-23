@@ -1,0 +1,18 @@
+[
+  {
+    "question": "支付平台的标准退款周期是多少？",
+    "relevant_keywords": ["退款", "7", "工作日"],
+    "retrieved_text": "退款申请审核通过后，通常在 7 个工作日内原路退回。",
+    "answer": "支付平台的标准退款周期是 7 个工作日。",
+    "observed_tool": null,
+    "expected_tool": null
+  },
+  {
+    "question": "请创建一个紧急工单：商户支付接口在生产环境持续超时。",
+    "relevant_keywords": ["支付", "超时"],
+    "retrieved_text": "支付接口错误排查手册：生产超时需要升级给值班团队。",
+    "answer": "已请求创建商户支付故障工单，等待审批。",
+    "observed_tool": "create_ticket",
+    "expected_tool": "create_ticket"
+  }
+]

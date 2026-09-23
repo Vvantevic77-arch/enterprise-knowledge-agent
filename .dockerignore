@@ -1,0 +1,30 @@
+# Keep the build context lean: everything listed here is either regenerated
+# inside the image (the venv, caches) or must never be baked into a layer
+# (databases, credentials).
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local databases. The container starts from an empty schema instead — the
+# demo corpus is re-seeded per registrant, so nothing here is load-bearing.
+*.db
+*.db-shm
+*.db-wal
+*.bak
+
+# Secrets. Render injects configuration as environment variables; a stray .env
+# in the image would silently override them with local development values.
+.env
+.env.*
+!.env.example
+
+.pytest_cache/
+.ruff_cache/
+.git/
+.gitignore
+tests/
+evals/
+docs/
+assets/
+*.log

@@ -1,0 +1,45 @@
+# Render Blueprint — one web service, no external dependencies.
+#
+# The app is deliberately self-contained: SQLite for storage and an in-process
+# vector scan, so this needs no managed database, no Redis and no worker. The
+# free Postgres tier expires after 30 days, so avoiding it also avoids the
+# service breaking a month from now.
+#
+# Deploy: push this repo to GitHub, then "New +" -> "Blueprint" in Render and
+# pick the repo. Render reads this file and prompts for the two secrets below.
+
+services:
+  - type: web
+    name: payment-operations-agent
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: singapore
+    healthCheckPath: /v1/health
+    autoDeploy: true
+    envVars:
+      # Render assigns the port and expects the process to bind to it. The
+      # Dockerfile reads this; hardcoding 8080 would fail the health check.
+      - key: PORT
+        value: 8080
+      # Non-development, so config.py refuses to start on the default JWT
+      # secret and the permissive localhost CORS rule stays off.
+      - key: APP_ENV
+        value: production
+      # Generated at deploy time rather than committed: never let the signing
+      # key live in the repository.
+      - key: JWT_SECRET
+        generateValue: true
+      # Durable across restarts within one instance. Free instances lose their
+      # disk on redeploy, which is fine here: registration re-seeds the demo
+      # corpus, so a wiped database self-heals on the next sign-up.
+      - key: DATABASE_URL
+        value: sqlite+aiosqlite:///./agent.db
+      - key: EMBEDDING_PROVIDER
+        value: deterministic
+      - key: LLM_PROVIDER
+        value: deepseek
+      # Paste your own key in the Render dashboard. Left unsynced so it is
+      # never read from a file in this repo.
+      - key: DEEPSEEK_API_KEY
+        sync: false

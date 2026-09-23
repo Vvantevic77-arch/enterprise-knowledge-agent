@@ -1,0 +1,16 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+*.db
+.pytest_cache/
+.ruff_cache/
+
+# macOS metadata
+.DS_Store
+
+# Build artifacts from editable installs
+*.egg-info/
+
+# Personal career material — not part of the application
+docs/resume-project-description.md
