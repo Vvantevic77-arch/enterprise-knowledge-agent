@@ -1,82 +1,143 @@
-"""Run event publication and replay.
-
-Two transports, one interface:
-
-* **In-process ring buffer** — always available. It is what makes the offline
-  test suite deterministic and what keeps the demo working without Redis.
-* **Redis Streams** — used when Redis is reachable, so events survive a worker
-  restart and can be consumed by an audit pipeline or another UI replica.
-
-Consumers always read through ``read_events``, so the WebSocket route does not
-care which transport is live.
-"""
+"""Bounded local run events with optional Redis Streams replay."""
 
 from __future__ import annotations
 
 import json
 import logging
-from collections import defaultdict
-from collections.abc import AsyncIterator
+import time
+from collections import OrderedDict, deque
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextvars import ContextVar
 from typing import Any
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
-
-#: How many events to retain per run in the in-process buffer. A long run that
-#: exceeds this keeps its newest events; Redis is the durable option.
 _MAX_BUFFERED_EVENTS = 1000
+_MAX_BUFFERED_RUNS = 256
+_EVENT_TTL_SECONDS = 3600
+_REDIS_RETRY_SECONDS = 30
 
-_streams: dict[str, list[dict[str, Any]]] = defaultdict(list)
+_streams: OrderedDict[str, tuple[float, deque]] = OrderedDict()
 _redis_client: Any | None = None
-_redis_unavailable = False
+_redis_retry_at = 0.0
+event_sink: ContextVar[Callable[[dict[str, Any]], Awaitable[None]] | None] = ContextVar(
+    "agent_event_sink", default=None
+)
+
+
+def _prune() -> None:
+    now = time.monotonic()
+    while _streams:
+        run_id, (touched, _) = next(iter(_streams.items()))
+        if now - touched < _EVENT_TTL_SECONDS and len(_streams) <= _MAX_BUFFERED_RUNS:
+            break
+        _streams.pop(run_id)
 
 
 def _get_redis_client() -> Any:
-    """One process-wide Redis client backed by a connection pool."""
     global _redis_client
     if _redis_client is None:
         import redis.asyncio as redis
+        from redis.backoff import NoBackoff
+        from redis.retry import Retry
 
-        _redis_client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
+        _redis_client = redis.Redis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=0.2,
+            socket_timeout=0.2,
+            retry=Retry(NoBackoff(), 0),
+        )
     return _redis_client
 
 
+def _redis_failed() -> None:
+    global _redis_retry_at
+    _redis_retry_at = time.monotonic() + _REDIS_RETRY_SECONDS
+    logger.info("Redis unavailable; using bounded local run events")
+
+
 async def publish_event(run_id: str, event: dict[str, Any]) -> None:
-    """Publish to the in-process buffer and, best-effort, to Redis."""
-    global _redis_unavailable
-
-    buffer = _streams[run_id]
-    buffer.append(event)
-    if len(buffer) > _MAX_BUFFERED_EVENTS:
-        del buffer[: len(buffer) - _MAX_BUFFERED_EVENTS]
-
-    if _redis_unavailable:
+    _prune()
+    _, buffer = _streams.pop(run_id, (0, deque(maxlen=_MAX_BUFFERED_EVENTS)))
+    sequence = buffer[-1][0] + 1 if buffer else 1
+    entry = (sequence, dict(event), None)
+    buffer.append(entry)
+    _streams[run_id] = (time.monotonic(), buffer)
+    _prune()
+    sink = event_sink.get()
+    if sink is not None:
+        await sink(dict(event))
+    if time.monotonic() < _redis_retry_at:
         return
     try:
-        await _get_redis_client().xadd(
-            f"agent:run:{run_id}",
+        key = f"agent:run:{run_id}"
+        pipeline = _get_redis_client().pipeline(transaction=False)
+        pipeline.xadd(
+            key,
             {"payload": json.dumps(event, ensure_ascii=False, default=str)},
             maxlen=_MAX_BUFFERED_EVENTS,
             approximate=True,
         )
+        pipeline.expire(key, _EVENT_TTL_SECONDS)
+        event_id, _ = await pipeline.execute()
+        # Another coroutine may append while publication waits for Redis.
+        for index, item in enumerate(buffer):
+            if item is entry:
+                buffer[index] = (sequence, item[1], event_id)
+                break
     except Exception:
-        # Redis is optional. Stop retrying on every event once it is known to be
-        # down, otherwise a Redis outage turns into a per-event latency spike.
-        _redis_unavailable = True
-        logger.info("Redis unavailable; run events are in-process only")
+        _redis_failed()
 
 
-async def read_events(run_id: str, after: int = 0) -> AsyncIterator[dict[str, Any]]:
-    """Replay buffered events for a run, starting after index ``after``."""
-    for event in _streams.get(run_id, [])[after:]:
-        yield event
+async def read_events(run_id: str, after: int | str = 0) -> AsyncIterator[dict[str, Any]]:
+    _prune()
+    if time.monotonic() >= _redis_retry_at:
+        try:
+            rows = await _get_redis_client().xrange(
+                f"agent:run:{run_id}",
+                min=f"({after}" if isinstance(after, str) else "-",
+                count=_MAX_BUFFERED_EVENTS,
+            )
+            if isinstance(after, int) and after:
+                rows = rows[after:]
+            if rows:
+                for event_id, fields in rows:
+                    yield {**json.loads(fields["payload"]), "_cursor": event_id}
+                return
+        except Exception:
+            _redis_failed()
+    cached = _streams.get(run_id)
+    if cached is None:
+        return
+    buffered = list(cached[1])
+    acknowledged = next((seq for seq, _, redis_id in buffered if redis_id == after), None)
+    for sequence, event, event_id in buffered:
+        if isinstance(after, int):
+            fresh = sequence > after
+        elif acknowledged is not None:
+            fresh = sequence > acknowledged
+        else:
+            fresh = event_id is not None and tuple(map(int, event_id.split("-"))) > tuple(
+                map(int, after.split("-"))
+            )
+        if fresh:
+            yield {**event, "_cursor": event_id or sequence}
 
 
 def event_count(run_id: str) -> int:
-    return len(_streams.get(run_id, []))
+    _prune()
+    cached = _streams.get(run_id)
+    return cached[1][-1][0] if cached and cached[1] else 0
 
 
 def reset() -> None:
-    """Clear the buffer. Used by tests to keep runs independent."""
     _streams.clear()
+
+
+async def close() -> None:
+    global _redis_client
+    if _redis_client is not None:
+        await _redis_client.aclose()
+        _redis_client = None

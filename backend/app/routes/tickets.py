@@ -10,13 +10,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 
+from app import audit
 from app.auth import Db, require
-from app.core_exceptions import ConflictError, NotFoundError
+from app.core_exceptions import AuthorizationError, NotFoundError
 from app.idempotency import replay_or_execute
-from app.models import AgentRun, ApprovalRequest, RunStatus, Ticket, TicketEvent
+from app.models import AgentRun, ApprovalRequest, RunStatus, Ticket
 from app.permissions import Action, Principal, Resource, required_approvals
 from app.schemas import (
     AgentRunRead,
@@ -30,6 +31,7 @@ from app.services.tickets import (
     execute_ticket_action,
     get_ticket,
     list_ticket_events,
+    may_perform,
 )
 
 router = APIRouter(tags=["tickets"])
@@ -62,9 +64,7 @@ async def list_tickets(
     stmt = select(Ticket).where(Ticket.org_id == principal.org_id)
     if status_filter:
         stmt = stmt.where(Ticket.status == status_filter)
-    rows = (
-        await db.execute(stmt.order_by(Ticket.created_at.desc()).limit(limit))
-    ).scalars().all()
+    rows = (await db.execute(stmt.order_by(Ticket.created_at.desc()).limit(limit))).scalars().all()
     return [_ticket_read(row) for row in rows]
 
 
@@ -127,6 +127,19 @@ async def apply_ticket_action(
     ``waiting_approval`` with an ``approval_id`` when it was gated.
     """
     ticket = await get_ticket(db, org_id=principal.org_id, ticket_id=ticket_id)
+    if not may_perform(principal.role, payload.action):
+        audit.record_denied(
+            db,
+            action=f"ticket.{payload.action}",
+            resource="ticket",
+            org_id=principal.org_id,
+            actor_id=principal.user_id,
+            resource_id=ticket_id,
+            reason=f"role {principal.role!r} cannot {payload.action}",
+        )
+        raise AuthorizationError(
+            message=f"Role '{principal.role}' cannot {payload.action} a ticket"
+        )
 
     risk_tier = _requires_approval(ticket, payload.action)
 
@@ -136,6 +149,16 @@ async def apply_ticket_action(
         )
 
     async def _execute() -> dict[str, Any]:
+        run = AgentRun(
+            org_id=principal.org_id,
+            user_id=principal.user_id,
+            prompt=f"ticket.{payload.action} on {ticket_id}",
+            status=RunStatus.RUNNING.value,
+            intent="ticket",
+            risk_tier=ticket.risk_tier,
+        )
+        db.add(run)
+        await db.flush()
         updated = await execute_ticket_action(
             db,
             org_id=principal.org_id,
@@ -146,23 +169,16 @@ async def apply_ticket_action(
             resolution=payload.resolution,
             assignee_id=payload.assignee_id,
         )
-        await db.commit()
-        return {
-            "ticket_id": updated.id,
-            "ticket_status": updated.status,
-            "trace_id": run.trace_id,
-        }
-
-    run = AgentRun(
-        org_id=principal.org_id,
-        user_id=principal.user_id,
-        prompt=f"ticket.{payload.action} on {ticket_id}",
-        status=RunStatus.RUNNING.value,
-        intent="ticket",
-        risk_tier=ticket.risk_tier,
-    )
-    db.add(run)
-    await db.flush()
+        run.status = RunStatus.SUCCEEDED.value
+        run.answer = f"工单 {updated.id} 已更新为 {updated.status}。"
+        return AgentRunRead(
+            id=run.id,
+            trace_id=run.trace_id,
+            status=run.status,
+            answer=run.answer,
+            intent="ticket",
+            risk_tier=updated.risk_tier,
+        ).model_dump(mode="json")
 
     response, replayed = await replay_or_execute(
         db,
@@ -173,22 +189,26 @@ async def apply_ticket_action(
         execute=_execute,
     )
 
-    refreshed = await db.get(Ticket, ticket_id)
-    if refreshed is None:  # pragma: no cover
-        raise NotFoundError(message="ticket not found")
-    await db.refresh(run)
-    return AgentRunRead(
-        id=run.id,
-        trace_id=run.trace_id,
-        status=RunStatus.SUCCEEDED.value,
-        answer=(
-            f"工单 {refreshed.id} 已更新为 {refreshed.status}。"
-            + ("（幂等重放）" if replayed else "")
-        ),
-        intent="ticket",
-        risk_tier=refreshed.risk_tier,
-        replayed=replayed,
-    )
+    # Reservation, run, transition and response become durable together.
+    await db.commit()
+    if "id" not in response:
+        # Responses stored by earlier versions contain a trace, not a run ID.
+        previous_run = await db.scalar(
+            select(AgentRun).where(
+                AgentRun.org_id == principal.org_id, AgentRun.trace_id == response["trace_id"]
+            )
+        )
+        if previous_run is None:
+            raise NotFoundError(message="original ticket action run not found")
+        response = {
+            "id": previous_run.id,
+            "trace_id": previous_run.trace_id,
+            "status": RunStatus.SUCCEEDED.value,
+            "intent": "ticket",
+            "risk_tier": previous_run.risk_tier,
+            "answer": f"工单 {response['ticket_id']} 已更新为 {response['ticket_status']}。",
+        }
+    return AgentRunRead.model_validate({**response, "replayed": replayed})
 
 
 async def _gate_ticket_action(
@@ -263,15 +283,19 @@ async def ticket_approvals(
     """Approvals that have ever targeted this ticket."""
     await get_ticket(db, org_id=principal.org_id, ticket_id=ticket_id)
     rows = (
-        await db.execute(
-            select(ApprovalRequest)
-            .where(
-                ApprovalRequest.org_id == principal.org_id,
-                ApprovalRequest.tool_name.like("ticket.%"),
+        (
+            await db.execute(
+                select(ApprovalRequest)
+                .where(
+                    ApprovalRequest.org_id == principal.org_id,
+                    ApprovalRequest.tool_name.like("ticket.%"),
+                )
+                .order_by(ApprovalRequest.created_at.desc())
             )
-            .order_by(ApprovalRequest.created_at.desc())
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return [
         {
             "id": row.id,

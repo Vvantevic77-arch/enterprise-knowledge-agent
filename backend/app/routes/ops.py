@@ -44,14 +44,12 @@ async def list_audit_logs(
     if action:
         stmt = stmt.where(AuditLog.action == action)
 
-    total = await db.scalar(
-        select(func.count()).select_from(stmt.subquery())
-    )
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
     rows = (
-        await db.execute(
-            stmt.order_by(AuditLog.created_at.desc()).offset(skip).limit(limit)
-        )
-    ).scalars().all()
+        (await db.execute(stmt.order_by(AuditLog.created_at.desc()).offset(skip).limit(limit)))
+        .scalars()
+        .all()
+    )
     return PaginatedAuditLogs(
         items=[
             AuditLogRead(
@@ -76,19 +74,23 @@ async def usage_summary(
     db: Db,
     principal: Principal = Depends(require(Action.READ, Resource.USAGE)),
 ) -> Any:
-    rows = (
+    totals = (
         await db.execute(
-            select(UsageEvent).where(UsageEvent.org_id == principal.org_id)
+            select(
+                func.coalesce(func.sum(UsageEvent.input_tokens), 0),
+                func.coalesce(func.sum(UsageEvent.output_tokens), 0),
+                func.coalesce(func.sum(UsageEvent.cost_usd), 0),
+            ).where(UsageEvent.org_id == principal.org_id)
         )
-    ).scalars().all()
+    ).one()
     runs = await db.scalar(
         select(func.count(AgentRun.id)).where(AgentRun.org_id == principal.org_id)
     )
     return UsageSummary(
         runs=int(runs or 0),
-        input_tokens=sum(row.input_tokens for row in rows),
-        output_tokens=sum(row.output_tokens for row in rows),
-        estimated_cost_usd=round(sum(float(row.cost_usd or 0.0) for row in rows), 6),
+        input_tokens=int(totals[0]),
+        output_tokens=int(totals[1]),
+        estimated_cost_usd=round(float(totals[2]), 6),
     )
 
 
@@ -100,10 +102,11 @@ async def health(db: Db) -> Any:
     deterministic embeddings would degrade retrieval without failing anything —
     this endpoint makes that state visible.
     """
-    document_count = await db.scalar(select(func.count(Document.id)))
-    kb_count = await db.scalar(select(func.count(KnowledgeBase.id)))
+    await db.execute(select(1))
     vector_backend = (
-        "pgvector-hnsw"
+        "sqlite-fts5-bm25-cjk"
+        if settings.is_sqlite and settings.embedding_provider == "deterministic"
+        else "pgvector-hnsw"
         if PGVECTOR_AVAILABLE and not settings.is_sqlite
         else "json-python-scan"
     )
@@ -127,9 +130,7 @@ async def workspace_stats(
     from app.models import ApprovalRequest, Ticket
 
     kbs = await db.scalar(
-        select(func.count(KnowledgeBase.id)).where(
-            KnowledgeBase.org_id == principal.org_id
-        )
+        select(func.count(KnowledgeBase.id)).where(KnowledgeBase.org_id == principal.org_id)
     )
     docs = await db.scalar(
         select(func.count(Document.id)).where(Document.org_id == principal.org_id)

@@ -12,6 +12,7 @@ import sys
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -19,45 +20,50 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 
 # Must be set before importing app.config, which builds Settings at import time.
-_DB_FILE = Path(tempfile.gettempdir()) / "payment_ops_test.db"
-os.environ.setdefault("APP_ENV", "test")
+_DB_FILE = Path(tempfile.gettempdir()) / f"payment_ops_test_{uuid4().hex}.db"
+os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_DB_FILE}"
 os.environ["EMBEDDING_PROVIDER"] = "deterministic"
 os.environ["JWT_SECRET"] = "test-only-secret-not-used-outside-tests"
 os.environ["ALLOW_HEADER_IDENTITY"] = "false"
-os.environ.pop("OPENAI_API_KEY", None)
-os.environ.pop("DEEPSEEK_API_KEY", None)
+# Empty environment values override credentials in a developer's .env file.
+os.environ["OPENAI_API_KEY"] = ""
+os.environ["DEEPSEEK_API_KEY"] = ""
 
 import httpx  # noqa: E402
-from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
-
-from app.db import Base, SessionLocal, engine  # noqa: E402
+from app.db import Base, SessionLocal, engine, init_sqlite_search  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import Membership, Organization, Role, User  # noqa: E402
-from app.security import hash_password  # noqa: E402
+from app.models import Role  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _prepare_database() -> None:
-    if _DB_FILE.exists():
-        _DB_FILE.unlink()
+def _prepare_database():
+    yield
+    _DB_FILE.unlink(missing_ok=True)
 
 
 @pytest.fixture
 async def db() -> AsyncIterator[AsyncSession]:
     async with engine.begin() as connection:
+        await connection.execute(text("PRAGMA journal_mode=WAL"))
+        await connection.execute(text("DROP TABLE IF EXISTS document_chunks_fts"))
+        await connection.execute(text("DROP TABLE IF EXISTS document_chunks_trigram"))
+        await connection.execute(text("DROP TABLE IF EXISTS document_chunks_cjk"))
         await connection.run_sync(Base.metadata.drop_all)
         await connection.run_sync(Base.metadata.create_all)
+        await init_sqlite_search(connection)
     async with SessionLocal() as session:
         yield session
+    # Async pool waiters must not survive into the next test's event loop.
+    await engine.dispose()
 
 
 @pytest.fixture
-async def client(db: AsyncSession) -> AsyncIterator[httpx.AsyncClient]:
+async def client(db: AsyncSession) -> AsyncIterator[httpx.AsyncClient]:  # noqa: ARG001 — schema fixture
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(
-        transport=transport, base_url="http://testserver"
-    ) as http_client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as http_client:
         yield http_client
 
 
@@ -158,17 +164,23 @@ async def add_member(client: httpx.AsyncClient, owner: Actor, *, email: str, rol
 
 @pytest.fixture
 async def admin(client: httpx.AsyncClient, owner: Actor) -> Actor:
-    return await add_member(client, owner, email="admin@acme-payments.example", role=Role.ADMIN.value)
+    return await add_member(
+        client, owner, email="admin@acme-payments.example", role=Role.ADMIN.value
+    )
 
 
 @pytest.fixture
 async def member(client: httpx.AsyncClient, owner: Actor) -> Actor:
-    return await add_member(client, owner, email="member@acme-payments.example", role=Role.MEMBER.value)
+    return await add_member(
+        client, owner, email="member@acme-payments.example", role=Role.MEMBER.value
+    )
 
 
 @pytest.fixture
 async def viewer(client: httpx.AsyncClient, owner: Actor) -> Actor:
-    return await add_member(client, owner, email="viewer@acme-payments.example", role=Role.VIEWER.value)
+    return await add_member(
+        client, owner, email="viewer@acme-payments.example", role=Role.VIEWER.value
+    )
 
 
 async def seed_corpus(client: httpx.AsyncClient, actor: Actor) -> str:

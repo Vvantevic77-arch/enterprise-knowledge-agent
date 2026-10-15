@@ -7,7 +7,6 @@ high-risk actions pausing for human review.
 from __future__ import annotations
 
 import pytest
-
 from app.models import RiskTier
 from app.permissions import REQUIRED_APPROVALS, approver_roles, required_approvals
 from app.services.policy import (
@@ -17,7 +16,6 @@ from app.services.policy import (
     ticket_arguments,
     wants_ticket,
 )
-
 
 # ---------------------------------------------------------------------------
 # Ticket intent
@@ -132,8 +130,29 @@ def test_ordinary_ticket_is_medium_risk() -> None:
     assert classify_risk(prompt, "ticket") == RiskTier.MEDIUM.value
 
 
-def test_a_plain_question_is_low_risk() -> None:
-    assert classify_risk("退款多久到账？", "refund") == RiskTier.LOW.value
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "退款多久到账？",
+        "退款流程是什么？",
+        "How long does a refund take?",
+        "What is the refund status?",
+    ],
+)
+def test_a_plain_question_is_low_risk(prompt: str) -> None:
+    assert classify_risk(prompt, classify_intent(prompt).name) == RiskTier.LOW.value
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "请退款这个订单。",
+        "请执行退款。",
+        "Please issue a refund for order 123.",
+    ],
+)
+def test_explicit_refund_commands_remain_high_risk(prompt: str) -> None:
+    assert classify_risk(prompt, classify_intent(prompt).name) == RiskTier.HIGH.value
 
 
 # ---------------------------------------------------------------------------

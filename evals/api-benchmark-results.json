@@ -1,0 +1,101 @@
+{
+  "environment": {
+    "python": "3.12.14",
+    "platform": "macOS-15.6.1-arm64-arm-64bit",
+    "database": "SQLite temporary file",
+    "llm": "disabled; deterministic offline mode"
+  },
+  "corpus": {
+    "documents": 11,
+    "chunks": 18,
+    "knowledge_bases": 1
+  },
+  "benchmark": {
+    "total_requests_per_level": 200,
+    "levels": [
+      1,
+      10,
+      25,
+      50
+    ]
+  },
+  "latency": {
+    "health": {
+      "1": {
+        "requests": 200,
+        "concurrency": 1,
+        "p50_ms": 1.767,
+        "p95_ms": 1.993,
+        "p99_ms": 2.121,
+        "error_rate": 0.0,
+        "throughput_requests_per_second": 511.43
+      },
+      "10": {
+        "requests": 200,
+        "concurrency": 10,
+        "p50_ms": 15.896,
+        "p95_ms": 19.166,
+        "p99_ms": 24.815,
+        "error_rate": 0.0,
+        "throughput_requests_per_second": 610.86
+      },
+      "25": {
+        "requests": 200,
+        "concurrency": 25,
+        "p50_ms": 42.535,
+        "p95_ms": 65.76,
+        "p99_ms": 78.016,
+        "error_rate": 0.0,
+        "throughput_requests_per_second": 552.16
+      },
+      "50": {
+        "requests": 200,
+        "concurrency": 50,
+        "p50_ms": 83.24,
+        "p95_ms": 136.81,
+        "p99_ms": 181.797,
+        "error_rate": 0.0,
+        "throughput_requests_per_second": 557.88
+      }
+    },
+    "knowledge_bases": {
+      "1": {
+        "requests": 200,
+        "concurrency": 1,
+        "p50_ms": 3.463,
+        "p95_ms": 3.77,
+        "p99_ms": 4.238,
+        "error_rate": 0.0,
+        "throughput_requests_per_second": 283.72
+      },
+      "10": {
+        "requests": 200,
+        "concurrency": 10,
+        "p50_ms": 6.276,
+        "p95_ms": 208.348,
+        "p99_ms": 565.575,
+        "error_rate": 0.0,
+        "throughput_requests_per_second": 259.98
+      },
+      "25": {
+        "requests": 200,
+        "concurrency": 25,
+        "p50_ms": 41.406,
+        "p95_ms": 388.2,
+        "p99_ms": 791.994,
+        "error_rate": 0.0,
+        "throughput_requests_per_second": 201.75
+      },
+      "50": {
+        "requests": 200,
+        "concurrency": 50,
+        "p50_ms": 123.446,
+        "p95_ms": 573.965,
+        "p99_ms": 804.937,
+        "error_rate": 0.0,
+        "throughput_requests_per_second": 217.88
+      }
+    }
+  },
+  "generated_at_utc": "2026-10-12T02:37:56Z"
+}

@@ -16,7 +16,9 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
+from sqlalchemy.dialects.postgresql import to_tsvector
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.config import settings
@@ -135,7 +137,7 @@ class User(Base):
     #: Platform-level flag, independent of organisation membership.
     is_app_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    memberships: Mapped[list["Membership"]] = relationship(
+    memberships: Mapped[list[Membership]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 
@@ -164,10 +166,10 @@ class Organization(Base):
     name: Mapped[str] = mapped_column(String(160))
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    memberships: Mapped[list["Membership"]] = relationship(
+    memberships: Mapped[list[Membership]] = relationship(
         back_populates="organization", cascade="all, delete-orphan"
     )
-    knowledge_bases: Mapped[list["KnowledgeBase"]] = relationship(
+    knowledge_bases: Mapped[list[KnowledgeBase]] = relationship(
         back_populates="organization", cascade="all, delete-orphan"
     )
 
@@ -199,7 +201,7 @@ class KnowledgeBase(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     organization: Mapped[Organization] = relationship(back_populates="knowledge_bases")
-    documents: Mapped[list["Document"]] = relationship(
+    documents: Mapped[list[Document]] = relationship(
         back_populates="knowledge_base", cascade="all, delete-orphan"
     )
 
@@ -224,7 +226,7 @@ class Document(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     knowledge_base: Mapped[KnowledgeBase] = relationship(back_populates="documents")
-    chunks: Mapped[list["DocumentChunk"]] = relationship(
+    chunks: Mapped[list[DocumentChunk]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
 
@@ -259,6 +261,13 @@ class DocumentChunk(Base):
         return f"<DocumentChunk(document_id={self.document_id}, ordinal={self.ordinal})>"
 
 
+Index(
+    "ix_document_chunks_lexical_gin",
+    to_tsvector(text("'simple'"), DocumentChunk.content),
+    postgresql_using="gin",
+).ddl_if(dialect="postgresql")
+
+
 class Ticket(Base):
     """A payment operations ticket with an explicit, enforced lifecycle."""
 
@@ -281,7 +290,7 @@ class Ticket(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    events: Mapped[list["TicketEvent"]] = relationship(
+    events: Mapped[list[TicketEvent]] = relationship(
         back_populates="ticket", cascade="all, delete-orphan"
     )
 
@@ -294,9 +303,7 @@ class TicketEvent(Base):
 
     __tablename__ = "ticket_events"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    ticket_id: Mapped[str] = mapped_column(
-        ForeignKey("tickets.id", ondelete="CASCADE"), index=True
-    )
+    ticket_id: Mapped[str] = mapped_column(ForeignKey("tickets.id", ondelete="CASCADE"), index=True)
     org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
     actor_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     action: Mapped[str] = mapped_column(String(40))
@@ -357,7 +364,7 @@ class ApprovalRequest(Base):
     result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    votes: Mapped[list["ApprovalVote"]] = relationship(
+    votes: Mapped[list[ApprovalVote]] = relationship(
         back_populates="approval", cascade="all, delete-orphan"
     )
 

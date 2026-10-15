@@ -14,8 +14,8 @@ It is suitable for project evidence, not a production API or database SLA.
 
 | Area | Metric | Result |
 | --- | --- | ---: |
-| Chunking | documents/sec | 46710.03 |
-| Chunking | MB/sec | 62.88 |
+| Chunking | documents/sec | 26228.31 |
+| Chunking | MB/sec | 35.31 |
 | Retrieval | Recall@1 | 65.42% |
 | Retrieval | Recall@3 | 81.67% |
 | Retrieval | Recall@5 | 86.25% |
@@ -43,17 +43,17 @@ The synthetic query includes each document's unique reference key, so lexical-on
 
 | Implementation | p50 (ms) | p95 (ms) | Throughput (req/s) |
 | --- | ---: | ---: | ---: |
-| Baseline full sort | 46.014 | 46.736 | 21.48 |
-| Optimized Top-K selection | 32.125 | 32.809 | 31.07 |
-| Change | - | **-29.80% p95** | **+44.62%** |
+| Baseline full sort | 78.635 | 79.0 | 12.72 |
+| Optimized Top-K selection | 49.576 | 49.748 | 20.17 |
+| Change | - | **-37.03% p95** | **+58.62%** |
 
 ### Concurrent retrieval latency
 
 | Workers | Requests | p50 (ms) | p95 (ms) | p99 (ms) | Throughput (req/s) |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 40 | 32.122 | 33.511 | 35.443 | 30.92 |
-| 10 | 40 | 164.058 | 428.982 | 550.299 | 30.75 |
-| 50 | 40 | 113.401 | 205.485 | 242.614 | 30.93 |
+| 1 | 100 | 49.632 | 50.05 | 50.788 | 20.13 |
+| 10 | 100 | 420.294 | 805.779 | 933.483 | 20.09 |
+| 50 | 100 | 302.318 | 646.354 | 817.083 | 20.07 |
 
 ## Reproduction and interpretation
 

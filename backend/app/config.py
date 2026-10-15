@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     embedding_provider: str = "deterministic"
     embedding_dimensions: int = 1536
     embedding_model: str = "text-embedding-3-small"
+    embedding_revision: str | None = None
+
+    # Local models are optional: install the ``retrieval`` extra before enabling.
+    retrieval_candidate_k: int = Field(default=50, ge=5, le=200)
+    retrieval_device: str = "cpu"
+    reranker_model: str | None = None
+    reranker_revision: str | None = None
 
     # --- Risk policy --------------------------------------------------------
     # A ticket at or above this tier needs two distinct approvers.
@@ -52,14 +59,22 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
 
+    @field_validator("embedding_revision", "reranker_model", "reranker_revision", mode="before")
+    @classmethod
+    def _empty_model_options(cls, value):
+        return value.strip() or None if isinstance(value, str) else value
+
     @model_validator(mode="after")
     def _reject_default_secret_outside_dev(self) -> "Settings":
+        if self.embedding_provider == "sentence_transformers" and not self.embedding_revision:
+            raise ValueError("Set EMBEDDING_REVISION to a fixed model commit before local indexing")
         development = {"development", "dev", "local", "test", "testing", "ci"}
-        if self.app_env.lower() not in development:
-            if self.jwt_secret.startswith("dev-only-insecure"):
-                raise ValueError(
-                    "JWT_SECRET must be set to a strong random value when APP_ENV is not a development environment"
-                )
+        if self.app_env.lower() not in development and self.jwt_secret.startswith(
+            "dev-only-insecure"
+        ):
+            raise ValueError(
+                "JWT_SECRET must be set to a strong random value when APP_ENV is not a development environment"
+            )
         return self
 
     @property
@@ -84,7 +99,9 @@ class Settings(BaseSettings):
 
     @property
     def dual_approval_tier_set(self) -> set[str]:
-        return {tier.strip().lower() for tier in self.dual_approval_tiers.split(",") if tier.strip()}
+        return {
+            tier.strip().lower() for tier in self.dual_approval_tiers.split(",") if tier.strip()
+        }
 
 
 @lru_cache

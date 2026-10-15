@@ -13,6 +13,7 @@ const state = {
   selectedKb: null,
   activeView: "overview",
   socket: null,
+  agentAbort: null,
   chatContextVersion: 0,
 };
 
@@ -42,6 +43,8 @@ function isCurrentChatContext(contextKey, contextVersion) {
  */
 function resetAgentChat() {
   state.chatContextVersion += 1;
+  state.agentAbort?.abort();
+  state.agentAbort = null;
   if (state.socket) {
     state.socket.close();
     state.socket = null;
@@ -241,19 +244,20 @@ function refreshAccessToken() {
   return refreshInFlight;
 }
 
-async function api(path, options = {}, { retry = true } = {}) {
+async function api(path, options = {}, { retry = true, stream = false } = {}) {
   const isJsonBody = typeof options.body === "string";
   const response = await fetch(`/v1${path}`, {
     ...options,
     headers: { ...authHeaders(isJsonBody), ...(options.headers || {}) },
   });
+  if (response.ok && stream) return response;
   const contentType = response.headers.get("content-type") || "";
   const payload = contentType.includes("application/json") ? await response.json() : await response.text();
 
   // An expired access token is recoverable exactly once per request.
   if (response.status === 401 && retry && state.refreshToken) {
     const token = await refreshAccessToken();
-    if (token) return api(path, options, { retry: false });
+    if (token) return api(path, options, { retry: false, stream });
     signOut({ silent: true });
   }
 
@@ -623,6 +627,7 @@ function addMessage(role, content, hint = "") {
   item.innerHTML = `<div class="message-avatar">${role === "user" ? escapeHtml(state.userId.slice(0, 2).toUpperCase()) : "AI"}</div><div><p class="message-meta">${role === "user" ? "You" : "Operations agent"}</p>${body}${hint ? `<span class="message-hint">${escapeHtml(hint)}</span>` : ""}</div>`;
   wrapper.appendChild(item);
   wrapper.scrollTop = wrapper.scrollHeight;
+  return item;
 }
 
 function bindPromptSuggestions() {
@@ -678,19 +683,57 @@ async function runAgent(event) {
   $("#agent-prompt").value = "";
   const submit = form.querySelector("button[type=submit]");
   setLoading(submit, true, "Running...");
+  const controller = new AbortController();
+  state.agentAbort = controller;
+  const message = addMessage("assistant", "正在检索运行手册…");
   try {
-    const run = await api("/agent/runs", { method: "POST", body: JSON.stringify({ prompt, knowledge_base_ids: kbIds }) });
+    const response = await api("/agent/runs/stream", {
+      method: "POST", signal: controller.signal,
+      body: JSON.stringify({ prompt, knowledge_base_ids: kbIds, idempotency_key: crypto.randomUUID() }),
+    }, { stream: true });
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "", answer = "", run = null;
+    const text = message.querySelector(".message-meta").nextElementSibling;
+    text.style.whiteSpace = "pre-wrap";
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      let boundary;
+      while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const data = frame.split("\n").find((line) => line.startsWith("data: "));
+        if (!data) continue;
+        const event = JSON.parse(data.slice(6));
+        if (event.type === "answer.delta") {
+          answer += event.text;
+          text.textContent = answer;
+          $("#chat-messages").scrollTop = $("#chat-messages").scrollHeight;
+        } else if (event.type === "answer.reset") {
+          answer = "";
+          text.textContent = "模型暂时不可用，正在整理运行手册…";
+        } else if (event.type === "run.result") {
+          run = event.run;
+        } else if (event.type === "run.error") {
+          throw new Error(event.message);
+        }
+      }
+      if (done) break;
+    }
     if (!isCurrentChatContext(contextKey, contextVersion)) return;
+    if (!run) throw new Error("回答连接提前结束，请查看运行记录确认结果。");
     renderRunDetails(run);
-    streamRun(run, contextKey, contextVersion);
     const hint = run.status === "waiting_approval" ? `Approval ${run.approval_id?.slice(0, 8) || "requested"} is waiting for an admin review.` : `Trace ${run.trace_id.slice(0, 12)}…`;
-    addMessage("assistant", run.answer || "The run is in progress. Watch the run details for updates.", hint);
+    message.lastElementChild.innerHTML = `<p class="message-meta">Operations agent</p>${renderAssistantContent(run.answer || "工单请求已提交，等待审批。")}<span class="message-hint">${escapeHtml(hint)}</span>`;
     await Promise.all([loadApprovals(), loadTickets()]);
   } catch (error) {
     if (!isCurrentChatContext(contextKey, contextVersion)) return;
-    addMessage("assistant", `The run could not be completed: ${error.message}`);
+    controller.abort();
+    message.lastElementChild.innerHTML = `<p>${escapeHtml(`The run could not be completed: ${error.message}`)}</p>`;
     showToast(error.message, "error");
   } finally {
+    if (state.agentAbort === controller) state.agentAbort = null;
     if (isCurrentChatContext(contextKey, contextVersion)) setLoading(submit, false);
   }
 }

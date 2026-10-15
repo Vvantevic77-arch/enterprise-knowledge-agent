@@ -94,7 +94,6 @@ def wants_ticket(prompt: str) -> bool:
 #: Actions that move money, change security posture, or touch production.
 #: These are high risk regardless of how the request is phrased.
 _HIGH_RISK_PATTERNS = (
-    r"退款|refund",
     r"重复扣款|double.?charge|多扣",
     r"密钥|key.{0,8}(轮换|撤销|revoke|rotate)|secret",
     r"泄露|泄漏|leak|泄露",
@@ -102,6 +101,16 @@ _HIGH_RISK_PATTERNS = (
     r"越权|未授权|unauthori[sz]ed",
     r"关闭|禁用|停用|disable|revoke.{0,12}access",
     r"大范围|影响全部|多个商户|multiple merchants",
+)
+
+# A refund topic is not itself an action; an information question must remain
+# low risk. Ticket requests and explicit refund commands still require review.
+_REFUND_ACTION_PATTERNS = (
+    r"(?:请|帮我|立即|马上|执行|发起|办理).{0,8}(?:退款|退还)",
+    r"(?:撤销|取消|处理).{0,8}(?:退款|退还)",
+    r"^(?:退款|退还)(?:这笔|该笔|订单|给|至|到)",
+    r"\b(?:issue|process|execute|initiate|cancel|reverse|perform)\b.{0,16}\brefund\b",
+    r"\brefund\b.{0,12}\b(?:order|transaction|payment)\b",
 )
 
 _CRITICAL_RISK_PATTERNS = (
@@ -121,6 +130,11 @@ def classify_risk(prompt: str, intent_name: str) -> str:
     if any(re.search(p, prompt, re.I) for p in _CRITICAL_RISK_PATTERNS):
         return RiskTier.CRITICAL.value
     high_hits = sum(bool(re.search(p, prompt, re.I)) for p in _HIGH_RISK_PATTERNS)
+    if re.search(REFUND_TERMS, prompt, re.I) and (
+        wants_ticket(prompt)
+        or any(re.search(p, prompt, re.I) for p in _REFUND_ACTION_PATTERNS)
+    ):
+        high_hits += 1
     if high_hits >= 1 and intent_name in {"refund", "security", "ticket", "settlement"}:
         return RiskTier.HIGH.value
     if high_hits >= 2:

@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import json
+import logging
+from collections.abc import AsyncGenerator
+from contextlib import suppress
+from typing import Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from anyio import CancelScope
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from app.auth import (
@@ -20,16 +26,29 @@ from app.models import AgentRun, ApprovalRequest
 from app.permissions import Action, Principal, Resource
 from app.schemas import AgentRunCreate, AgentRunRead, Citation
 from app.services.agent import start_run
-from app.services.events import read_events
+from app.services.events import event_sink, read_events
 
 router = APIRouter(tags=["agent"])
+logger = logging.getLogger(__name__)
 
 #: How long the event stream may run before it gives up on the run finishing.
 _WS_MAX_SECONDS = 600
 _WS_POLL_SECONDS = 0.15
 
 
-def _run_read(run: AgentRun, approval: ApprovalRequest | None = None, replayed: bool = False) -> AgentRunRead:
+class _RunStreamingResponse(StreamingResponse):
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # A failed ASGI send does not automatically close the suspended generator.
+            with CancelScope(shield=True):
+                await cast(AsyncGenerator[str, None], self.body_iterator).aclose()
+
+
+def _run_read(
+    run: AgentRun, approval: ApprovalRequest | None = None, replayed: bool = False
+) -> AgentRunRead:
     return AgentRunRead(
         id=run.id,
         trace_id=run.trace_id,
@@ -81,6 +100,56 @@ async def create_run(
     return read.model_copy(update={"citations": citations})
 
 
+@router.post("/agent/runs/stream")
+async def create_run_stream(
+    payload: AgentRunCreate,
+    db: Db,
+    principal: Principal = Depends(require(Action.CREATE, Resource.AGENT_RUN)),
+) -> StreamingResponse:
+    # The streaming producer owns a fresh session after authorization finishes.
+    await db.commit()
+
+    async def stream():
+        queue: asyncio.Queue = asyncio.Queue(maxsize=32)
+
+        async def execute():
+            token = event_sink.set(queue.put)
+            try:
+                async with SessionLocal() as session:
+                    result = await create_run(payload, session, principal)
+                await queue.put({"type": "run.result", "run": result.model_dump(mode="json")})
+            except AppError as exc:
+                await queue.put(
+                    {
+                        "type": "run.error",
+                        "status": exc.status_code,
+                        "message": exc.message,
+                        "details": exc.details,
+                    }
+                )
+            except Exception:
+                logger.exception("Streaming agent run failed")
+                await queue.put({"type": "run.error", "status": 500, "message": "Agent run failed"})
+            finally:
+                event_sink.reset(token)
+            await queue.put(None)
+
+        task = asyncio.create_task(execute())
+        try:
+            while (event := await queue.get()) is not None:
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        finally:
+            task.cancel()
+            with CancelScope(shield=True), suppress(asyncio.CancelledError):
+                await task
+
+    return _RunStreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 async def _context_for(db: Any, run: AgentRun) -> list[dict[str, Any]]:
     """Re-derive citations for a stored run from its recorded chunk IDs."""
     if not run.context_chunk_ids:
@@ -89,19 +158,28 @@ async def _context_for(db: Any, run: AgentRun) -> list[dict[str, Any]]:
 
     rows = (
         await db.execute(
-            select(DocumentChunk, Document.filename, Document.source_url)
+            select(DocumentChunk.id, Document.filename, Document.source_url)
             .join(Document, Document.id == DocumentChunk.document_id)
-            .where(DocumentChunk.id.in_(run.context_chunk_ids))
+            .where(
+                DocumentChunk.id.in_(run.context_chunk_ids),
+                Document.org_id == run.org_id,
+            )
         )
     ).all()
-    return [
-        {
-            "chunk_id": chunk.id,
+    # An IN query does not preserve the retrieval ranking stored on the run.
+    citations_by_id = {
+        chunk_id: {
+            "chunk_id": chunk_id,
             "filename": filename,
             "source_url": source_url,
             "score": 0.0,
         }
-        for chunk, filename, source_url in rows
+        for chunk_id, filename, source_url in rows
+    }
+    return [
+        citations_by_id[chunk_id]
+        for chunk_id in run.context_chunk_ids
+        if chunk_id in citations_by_id
     ]
 
 
@@ -112,13 +190,17 @@ async def list_runs(
     limit: int = Query(50, ge=1, le=200),
 ) -> Any:
     rows = (
-        await db.execute(
-            select(AgentRun)
-            .where(AgentRun.org_id == principal.org_id)
-            .order_by(AgentRun.created_at.desc())
-            .limit(limit)
+        (
+            await db.execute(
+                select(AgentRun)
+                .where(AgentRun.org_id == principal.org_id)
+                .order_by(AgentRun.created_at.desc())
+                .limit(limit)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return [_run_read(row) for row in rows]
 
 
@@ -130,18 +212,14 @@ async def get_run(
 ) -> Any:
     run = (
         await db.execute(
-            select(AgentRun).where(
-                AgentRun.id == run_id, AgentRun.org_id == principal.org_id
-            )
+            select(AgentRun).where(AgentRun.id == run_id, AgentRun.org_id == principal.org_id)
         )
     ).scalar_one_or_none()
     if run is None:
         raise NotFoundError(message="run not found")
 
     approval = (
-        await db.execute(
-            select(ApprovalRequest).where(ApprovalRequest.run_id == run.id)
-        )
+        await db.execute(select(ApprovalRequest).where(ApprovalRequest.run_id == run.id))
     ).scalar_one_or_none()
     read = _run_read(run, approval)
     citations = [
@@ -200,8 +278,8 @@ async def agent_stream(
         while elapsed < _WS_MAX_SECONDS:
             emitted = False
             async for event in read_events(run_id, cursor):
+                cursor = event.pop("_cursor", cursor + 1 if isinstance(cursor, int) else cursor)
                 await websocket.send_json(event)
-                cursor += 1
                 emitted = True
                 if event.get("type") == "run.completed":
                     await websocket.close(code=1000)

@@ -65,6 +65,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[tuple[str, str]]] = {
             (Action.CREATE.value, Resource.APPROVAL.value),
             (Action.READ.value, Resource.APPROVAL.value),
             (Action.CREATE.value, Resource.TICKET.value),
+            (Action.EXECUTE.value, Resource.TICKET.value),
             (Action.READ.value, Resource.USAGE.value),
         }
     ),

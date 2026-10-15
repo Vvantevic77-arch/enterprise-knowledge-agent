@@ -7,18 +7,19 @@ write another merchant's corpus by passing a different ``org_id``.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, File, UploadFile, status
+from fastapi import APIRouter, Depends, File, Query, UploadFile, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import audit
 from app.auth import Db, require
 from app.core_exceptions import ConflictError, NotFoundError, ValidationError
-from app.models import Document, DocumentStatus, DocumentChunk, KnowledgeBase
+from app.models import Document, DocumentChunk, DocumentStatus, KnowledgeBase
 from app.permissions import Action, Principal, Resource
 from app.schemas import DocumentRead, DocumentUrlCreate, KnowledgeBaseCreate, KnowledgeBaseRead
 from app.services.ingestion import create_document, encode_payload
@@ -34,9 +35,7 @@ _BLOCKED_HOSTS = {"localhost", "metadata.google.internal", "metadata"}
 async def _kb_or_404(db: AsyncSession, *, org_id: str, kb_id: str) -> KnowledgeBase:
     kb = (
         await db.execute(
-            select(KnowledgeBase).where(
-                KnowledgeBase.id == kb_id, KnowledgeBase.org_id == org_id
-            )
+            select(KnowledgeBase).where(KnowledgeBase.id == kb_id, KnowledgeBase.org_id == org_id)
         )
     ).scalar_one_or_none()
     if kb is None:
@@ -90,9 +89,7 @@ async def create_knowledge_base(
     if duplicate is not None:
         raise ConflictError(message="a knowledge base with that name already exists")
 
-    kb = KnowledgeBase(
-        org_id=principal.org_id, name=payload.name, description=payload.description
-    )
+    kb = KnowledgeBase(org_id=principal.org_id, name=payload.name, description=payload.description)
     db.add(kb)
     await db.flush()
     audit.record(
@@ -112,31 +109,23 @@ async def list_knowledge_bases(
     db: Db,
     principal: Principal = Depends(require(Action.READ, Resource.KNOWLEDGE_BASE)),
 ) -> Any:
-    counts = dict(
-        (
-            await db.execute(
-                select(Document.kb_id, func.count(Document.id))
-                .join(KnowledgeBase, KnowledgeBase.id == Document.kb_id)
-                .where(KnowledgeBase.org_id == principal.org_id)
-                .group_by(Document.kb_id)
-            )
-        ).all()
-    )
     rows = (
         await db.execute(
-            select(KnowledgeBase)
+            select(KnowledgeBase, func.count(Document.id))
+            .outerjoin(Document, Document.kb_id == KnowledgeBase.id)
             .where(KnowledgeBase.org_id == principal.org_id)
+            .group_by(KnowledgeBase.id)
             .order_by(KnowledgeBase.name)
         )
-    ).scalars().all()
+    ).all()
     return [
         KnowledgeBaseRead(
             id=row.id,
             name=row.name,
             description=row.description,
-            document_count=int(counts.get(row.id, 0)),
+            document_count=int(count),
         )
-        for row in rows
+        for row, count in rows
     ]
 
 
@@ -165,12 +154,22 @@ async def delete_knowledge_base(
 async def list_documents(
     db: Db,
     kb_id: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    skip: int = Query(0, ge=0),
     principal: Principal = Depends(require(Action.READ, Resource.DOCUMENT)),
 ) -> Any:
     stmt = select(Document).where(Document.org_id == principal.org_id)
     if kb_id:
         stmt = stmt.where(Document.kb_id == kb_id)
-    rows = (await db.execute(stmt.order_by(Document.created_at.desc()))).scalars().all()
+    rows = (
+        (
+            await db.execute(
+                stmt.order_by(Document.created_at.desc(), Document.id).offset(skip).limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
     return [_document_read(row) for row in rows]
 
 
@@ -208,9 +207,7 @@ async def upload_document(
         raise ValidationError(message="uploaded file is empty")
 
     filename = file.filename or "upload.txt"
-    document = await create_document(
-        db, org_id=principal.org_id, kb_id=kb.id, filename=filename
-    )
+    document = await create_document(db, org_id=principal.org_id, kb_id=kb.id, filename=filename)
     audit.record(
         db,
         action="document.upload",
@@ -240,9 +237,7 @@ async def ingest_url(
 
     existing = (
         await db.execute(
-            select(Document).where(
-                Document.kb_id == kb.id, Document.source_url == url
-            )
+            select(Document).where(Document.kb_id == kb.id, Document.source_url == url)
         )
     ).scalar_one_or_none()
 
@@ -291,9 +286,7 @@ async def reindex_document(
     """Force a re-ingest. Unchanged content is a zero-write no-op."""
     document = (
         await db.execute(
-            select(Document).where(
-                Document.id == document_id, Document.org_id == principal.org_id
-            )
+            select(Document).where(Document.id == document_id, Document.org_id == principal.org_id)
         )
     ).scalar_one_or_none()
     if document is None:
@@ -329,7 +322,7 @@ async def _dispatch_ingestion(
         from app.worker.tasks import reindex_task
 
         try:
-            reindex_task.delay(document_id)
+            await asyncio.to_thread(reindex_task.apply_async, args=(document_id,), retry=False)
         except Exception as exc:
             raise ValidationError(
                 message="reindex requires a running Celery worker and broker"
@@ -340,16 +333,18 @@ async def _dispatch_ingestion(
         raise ValidationError(message="no content supplied for ingestion")
 
     try:
-        ingest_document_task.delay(document_id, filename, encode_payload(raw))
+        await asyncio.to_thread(
+            ingest_document_task.apply_async,
+            args=(document_id, filename, encode_payload(raw)),
+            retry=False,
+        )
         return
     except Exception:
         # No broker reachable — ingest inline so the upload is still indexed.
         pass
 
     async with SessionLocal() as session:
-        await ingest_document(
-            session, document_id=document_id, filename=filename, raw=raw
-        )
+        await ingest_document(session, document_id=document_id, filename=filename, raw=raw)
         await session.commit()
 
 
@@ -363,22 +358,24 @@ async def list_document_chunks(
     """Inspect what was actually indexed. Useful when a recall drop is suspected."""
     document = (
         await db.execute(
-            select(Document).where(
-                Document.id == document_id, Document.org_id == principal.org_id
-            )
+            select(Document).where(Document.id == document_id, Document.org_id == principal.org_id)
         )
     ).scalar_one_or_none()
     if document is None:
         raise NotFoundError(message="document not found")
 
     rows = (
-        await db.execute(
-            select(DocumentChunk)
-            .where(DocumentChunk.document_id == document_id)
-            .order_by(DocumentChunk.ordinal)
-            .limit(max(1, min(limit, 200)))
+        (
+            await db.execute(
+                select(DocumentChunk)
+                .where(DocumentChunk.document_id == document_id)
+                .order_by(DocumentChunk.ordinal)
+                .limit(max(1, min(limit, 200)))
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return [
         {
             "id": row.id,

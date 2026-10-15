@@ -10,7 +10,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Document, DocumentStatus, KnowledgeBase
+from app.models import Document, KnowledgeBase
 from app.services.ingestion import create_document, ingest_document
 
 DEMO_KB_NAME = "Merchant operations demo"

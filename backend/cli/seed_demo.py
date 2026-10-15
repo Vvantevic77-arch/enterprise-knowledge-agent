@@ -31,14 +31,11 @@ os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///./agent.db")
 
 import argparse  # noqa: E402
 import asyncio  # noqa: E402
-import shutil  # noqa: E402
+import sqlite3  # noqa: E402
 import sys  # noqa: E402
 from datetime import datetime  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any  # noqa: E402
-
-from sqlalchemy import func, inspect, select  # noqa: E402
-from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from app import audit  # noqa: E402
 from app.config import settings  # noqa: E402
@@ -57,6 +54,8 @@ from app.security import hash_password  # noqa: E402
 from app.services.agent import start_run  # noqa: E402
 from app.services.demo import seed_demo_knowledge  # noqa: E402
 from app.services.tickets import execute_ticket_action  # noqa: E402
+from sqlalchemy import func, inspect, select, text  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 ORG_NAME = "Acme Payments"
 DEMO_PASSWORD = "demo-password-2026"
@@ -103,7 +102,10 @@ MANUAL_TICKETS: tuple[dict[str, Any], ...] = (
         "transitions": [
             ("triage", {}),
             ("start", {}),
-            ("resolve", {"resolution": "确认是 webhook 重放，已按 idempotency key 回滚第二笔扣款。"}),
+            (
+                "resolve",
+                {"resolution": "确认是 webhook 重放，已按 idempotency key 回滚第二笔扣款。"},
+            ),
         ],
     },
     {
@@ -159,7 +161,9 @@ def sqlite_path() -> Path | None:
 def backup_database(path: Path) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     target = path.with_name(f"{path.name}.{stamp}.bak")
-    shutil.copy2(path, target)
+    # Include committed WAL pages even when another process still has the DB open.
+    with sqlite3.connect(path) as source, sqlite3.connect(target) as destination:
+        source.backup(destination)
     return target
 
 
@@ -168,6 +172,8 @@ async def reset_schema(path: Path) -> None:
     backup = backup_database(path)
     print(f"  已备份     {backup.name}")
     async with engine.begin() as connection:
+        for suffix in ("fts", "trigram", "cjk"):
+            await connection.execute(text(f"DROP TABLE IF EXISTS document_chunks_{suffix}"))
         await connection.run_sync(Base.metadata.drop_all)
         await connection.run_sync(Base.metadata.create_all)
     print("  重建 schema 完成")
@@ -192,9 +198,7 @@ async def ensure_user(db: AsyncSession, email: str, display_name: str) -> User:
 async def ensure_membership(db: AsyncSession, user: User, org_id: str, role: str) -> None:
     membership = (
         await db.execute(
-            select(Membership).where(
-                Membership.user_id == user.id, Membership.org_id == org_id
-            )
+            select(Membership).where(Membership.user_id == user.id, Membership.org_id == org_id)
         )
     ).scalar_one_or_none()
     if membership is None:
@@ -207,15 +211,17 @@ async def ensure_membership(db: AsyncSession, user: User, org_id: str, role: str
 async def existing_run(db: AsyncSession, org_id: str, prompt: str) -> AgentRun | None:
     """Identity for idempotency: one seeded run per (org, prompt)."""
     return (
-        await db.execute(
-            select(AgentRun).where(AgentRun.org_id == org_id, AgentRun.prompt == prompt)
+        (
+            await db.execute(
+                select(AgentRun).where(AgentRun.org_id == org_id, AgentRun.prompt == prompt)
+            )
         )
-    ).scalars().first()
+        .scalars()
+        .first()
+    )
 
 
-async def seed_runs(
-    db: AsyncSession, org_id: str, requester: User, kb_ids: list[str]
-) -> None:
+async def seed_runs(db: AsyncSession, org_id: str, requester: User, kb_ids: list[str]) -> None:
     """Historical runs, the two pending approvals, and the tickets they produced."""
     principal = Principal(
         user_id=requester.id,
@@ -246,9 +252,7 @@ async def seed_runs(
         approval = result.approval
         tier = approval.risk_tier if approval else "—"
         required = approval.required_approvals if approval else 0
-        print(
-            f"  待审批     {tier:<9} 需要 {required} 人 · {prompt[:20]}…"
-        )
+        print(f"  待审批     {tier:<9} 需要 {required} 人 · {prompt[:20]}…")
 
     await db.commit()
 
@@ -328,9 +332,7 @@ async def seed_audit_trail(db: AsyncSession, org_id: str, actor: User) -> None:
 
 
 async def summarise(db: AsyncSession, org: Organization) -> None:
-    runs = await db.scalar(
-        select(func.count(AgentRun.id)).where(AgentRun.org_id == org.id)
-    )
+    runs = await db.scalar(select(func.count(AgentRun.id)).where(AgentRun.org_id == org.id))
     pending = await db.scalar(
         select(func.count(ApprovalRequest.id)).where(
             ApprovalRequest.org_id == org.id,
@@ -411,7 +413,7 @@ async def run(reset: bool = False) -> None:
         await summarise(db, org)
 
     print("\n  登录账号")
-    for email, display_name, role in DEMO_USERS:
+    for email, _display_name, role in DEMO_USERS:
         print(f"    {email:<32} {role}")
     print(f"  密码       {DEMO_PASSWORD}\n")
 

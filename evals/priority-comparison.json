@@ -1,0 +1,44 @@
+{
+  "before_backend_sha256": "2a116532b637eba35bce7acd6b9654d35aeffe69cb431e2271c3d2b22f6b2f14",
+  "after_backend_sha256": "fd334bdf7b60906626ac2acf76f15587e724caee0f5ffc2eb54fa857f7757492",
+  "before_archive_sha256": "00a25161ade218c2370fcc05fa0bdcc8aecb7fc340e516a118066e8c50c513f8",
+  "identical_corpus_prompts_validation_and_windows": true,
+  "matched_agent_concurrency": 16,
+  "before_p95_ms": [
+    1655.0813416019066,
+    1675.076587480725
+  ],
+  "after_p95_ms": [
+    517.4932937341508,
+    516.1014837096423
+  ],
+  "mean_trial_p95_reduction_fraction": 0.6896258977938261,
+  "mean_trial_successful_throughput_ratio": 3.314983512386153,
+  "before_confirmed_concurrency": 16,
+  "after_confirmed_concurrency": 32,
+  "after_tested_ceiling": 32,
+  "retrieval_rankings_unchanged": true,
+  "retrieval_recall_at_5": 0.5753333333333334,
+  "dependency_versions": {
+    "fastapi": "0.141.1",
+    "starlette": "1.6.0",
+    "sqlalchemy": "2.0.52",
+    "aiosqlite": "0.22.1",
+    "uvicorn": "0.52.4",
+    "httpx": "0.28.1",
+    "numpy": "2.5.3",
+    "langgraph": "1.2.11",
+    "redis": "6.4.0",
+    "celery": "5.6.3",
+    "pyarrow": "26.0.0"
+  },
+  "validation": {
+    "pytest_passed": 205,
+    "pytest_warnings": 2,
+    "frontend_tests_passed": 2,
+    "ruff_changed_files": "passed",
+    "new_type_diagnostics": 0,
+    "existing_type_diagnostics": 24,
+    "postgresql_gin_sql_compilation": "passed; no live PostgreSQL capacity test"
+  }
+}

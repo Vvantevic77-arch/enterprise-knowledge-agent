@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,7 +15,13 @@ from app.routes.router import router
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await init_db()
-    yield
+    try:
+        yield
+    finally:
+        from app.services import events, rag
+
+        await events.close()
+        await asyncio.to_thread(rag.close_embedding_client)
 
 
 def create_app() -> FastAPI:

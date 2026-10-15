@@ -1,0 +1,25 @@
+{
+  "conditions": "Actual _retrieve_node -> local query embedding -> tenant-scoped SQLite dense + lexical -> RRF -> real CrossEncoder; two English smoke fixtures, not retrieval benchmark or HTTP load test; includes cold-start time",
+  "embedding_identity": "f28bbfb77ca4245d9f65203a4ebf8a4ce2026ec3bcd3bfc6c892637913dcdf4f",
+  "records": [
+    {
+      "query": "When will my money get returned?",
+      "ranked_chunk_ids": [
+        "chunk-0-0",
+        "chunk-1-0",
+        "chunk-2-0"
+      ],
+      "elapsed_ms": 324.2479999898933
+    },
+    {
+      "query": "Where is the Eiffel Tower located?",
+      "ranked_chunk_ids": [
+        "chunk-1-0",
+        "chunk-0-0",
+        "chunk-2-0"
+      ],
+      "elapsed_ms": 106.95975000271574
+    }
+  ],
+  "passed": true
+}

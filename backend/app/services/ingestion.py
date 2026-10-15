@@ -6,9 +6,9 @@ the same code path that serves production traffic rather than a simulation.
 
 Incremental contract:
 
-* Same extracted text as last time → **zero** chunk writes. The document is
+* Same text and embedding/chunk configuration → **zero** chunk writes. The document is
   marked ``unchanged`` and its existing chunks are left alone.
-* Changed text → old chunks for that document are deleted and the new chunks
+* Changed text or index configuration → old chunks for that document are deleted and the new chunks
   embedded. Chunks belonging to other documents are never touched, which is
   where the saving comes from: a 24-document update in a 240-document corpus
   rewrites 96 chunks instead of all 960.
@@ -16,16 +16,22 @@ Incremental contract:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 from dataclasses import dataclass
-from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Document, DocumentChunk, DocumentStatus, KnowledgeBase, utcnow
-from app.services.rag import chunk_text, content_hash, embed_texts, extract_text
+from app.services.rag import (
+    aembed_texts,
+    chunk_text,
+    content_hash,
+    embedding_identity,
+    extract_text,
+)
 
 #: Default chunk geometry. Kept in one place so the benchmark and the worker
 #: cannot drift; changing it invalidates the published Recall@5 / MRR figures.
@@ -70,7 +76,7 @@ async def ingest_document(
         if text is None:
             if raw is None:
                 raise ValueError("either raw bytes or extracted text is required")
-            text = extract_text(filename, raw)
+            text = await asyncio.to_thread(extract_text, filename, raw)
     except Exception as exc:
         document.status = DocumentStatus.FAILED.value
         document.error = str(exc)
@@ -79,26 +85,37 @@ async def ingest_document(
         return IngestResult(document_id, DocumentStatus.FAILED.value, 0, 0, reason=str(exc))
 
     digest = content_hash(text)
+    embedding_key = embedding_identity()
 
     # --- Incremental fast path -------------------------------------------
     if document.content_hash == digest and document.status == DocumentStatus.INDEXED.value:
-        existing = await db.scalar(
-            select(func.count(DocumentChunk.id)).where(DocumentChunk.document_id == document_id)
-        )
-        return IngestResult(
-            document_id,
-            DocumentStatus.UNCHANGED.value,
-            int(existing or 0),
-            0,
-            reason="content hash unchanged",
-        )
+        metadata = (
+            await db.scalars(
+                select(DocumentChunk.metadata_json).where(DocumentChunk.document_id == document_id)
+            )
+        ).all()
+        if metadata and all(
+            item.get("embedding_identity") == embedding_key
+            and item.get("chunk_size") == chunk_size
+            and item.get("chunk_overlap") == chunk_overlap
+            for item in metadata
+        ):
+            return IngestResult(
+                document_id,
+                DocumentStatus.UNCHANGED.value,
+                len(metadata),
+                0,
+                reason="content and index configuration unchanged",
+            )
 
     pieces = chunk_text(text, size=chunk_size, overlap=chunk_overlap)
-    embeddings = embed_texts(pieces) if pieces else []
+    embeddings = await aembed_texts(pieces) if pieces else []
+    if len(embeddings) != len(pieces):
+        raise ValueError("embedding count does not match chunks; existing index retained")
 
     # Replace only this document's chunks.
     await db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == document_id))
-    for ordinal, (piece, vector) in enumerate(zip(pieces, embeddings)):
+    for ordinal, (piece, vector) in enumerate(zip(pieces, embeddings, strict=True)):
         db.add(
             DocumentChunk(
                 document_id=document_id,
@@ -109,6 +126,9 @@ async def ingest_document(
                     "filename": filename,
                     "source_url": document.source_url,
                     "content_hash": digest,
+                    "embedding_identity": embedding_key,
+                    "chunk_size": chunk_size,
+                    "chunk_overlap": chunk_overlap,
                 },
             )
         )
@@ -175,9 +195,7 @@ async def resolve_knowledge_base(
     """Tenant-scoped KB lookup. Returns None rather than leaking 403 vs 404."""
     return (
         await db.execute(
-            select(KnowledgeBase).where(
-                KnowledgeBase.id == kb_id, KnowledgeBase.org_id == org_id
-            )
+            select(KnowledgeBase).where(KnowledgeBase.id == kb_id, KnowledgeBase.org_id == org_id)
         )
     ).scalar_one_or_none()
 

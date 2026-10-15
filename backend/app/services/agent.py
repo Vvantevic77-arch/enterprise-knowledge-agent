@@ -22,18 +22,21 @@ Two properties matter for a payment platform:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, TypedDict
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import bindparam, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing_extensions import TypedDict
 
 from app import audit
 from app.config import settings
 from app.core_exceptions import ConflictError, NotFoundError, ValidationError
+from app.db import SessionLocal
 from app.idempotency import fingerprint, replay_or_execute
 from app.models import (
     AgentRun,
@@ -42,16 +45,18 @@ from app.models import (
     ApprovalVote,
     Document,
     DocumentChunk,
+    IdempotencyRecord,
     KnowledgeBase,
     RunStatus,
     Ticket,
     TicketEvent,
     UsageEvent,
+    new_id,
     utcnow,
 )
 from app.permissions import Principal, required_approvals
 from app.services import rag
-from app.services.events import publish_event
+from app.services.events import event_sink, publish_event
 from app.services.policy import classify_intent, classify_risk, sla_hours, ticket_arguments
 from app.services.tickets import execute_ticket_action
 
@@ -98,7 +103,73 @@ def _estimate_tokens(text: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-async def search_knowledge(
+async def _sqlite_lexical_candidates(
+    db: AsyncSession, org_id: str, query: str, kb_ids: list[str], top_k: int
+) -> list[dict[str, Any]]:
+    common = {
+        "the",
+        "and",
+        "for",
+        "are",
+        "was",
+        "what",
+        "how",
+        "who",
+        "why",
+        "when",
+        "where",
+        "which",
+        "with",
+        "from",
+        "you",
+        "your",
+        "this",
+        "that",
+    }
+    words = {
+        word
+        for word in re.findall(r"[a-z0-9_]+", query.lower())
+        if word not in common and (len(word) > 2 or word.isdigit())
+    }
+    bigrams = set(rag.cjk_index_text(query).split())
+    searches = (("document_chunks_fts", words), ("document_chunks_cjk", bigrams))
+    candidates: dict[str, dict[str, Any]] = {}
+    for table, terms in searches:
+        if not terms:
+            continue
+        match = " OR ".join(f'"{term}"' for term in sorted(terms))
+        scope = "AND kb.id IN :kb_ids" if kb_ids else ""
+        statement = text(
+            f"SELECT c.id, c.content, d.filename, d.source_url "
+            f"FROM {table} JOIN document_chunks AS c ON c.rowid = {table}.rowid "
+            "JOIN documents AS d ON d.id = c.document_id "
+            "JOIN knowledge_bases AS kb ON kb.id = d.kb_id "
+            f"WHERE {table} MATCH :match AND d.status = 'indexed' "
+            f"AND kb.org_id = :org_id {scope} "
+            f"ORDER BY bm25({table}) LIMIT :limit"
+        )
+        if kb_ids:
+            statement = statement.bindparams(bindparam("kb_ids", expanding=True))
+        rows = (
+            await db.execute(
+                statement,
+                {"match": match, "org_id": org_id, "kb_ids": kb_ids, "limit": max(100, top_k * 20)},
+            )
+        ).all()
+        for rank, (chunk_id, content, filename, source_url) in enumerate(rows):
+            score = 1 / (rank + 1)
+            if chunk_id not in candidates or candidates[chunk_id]["score"] < score:
+                candidates[chunk_id] = {
+                    "content": content,
+                    "score": score,
+                    "filename": filename,
+                    "source_url": source_url,
+                    "chunk_id": chunk_id,
+                }
+    return sorted(candidates.values(), key=lambda item: item["score"], reverse=True)[:top_k]
+
+
+async def _retrieve_candidates(
     db: AsyncSession,
     org_id: str,
     query: str,
@@ -111,7 +182,25 @@ async def search_knowledge(
     within the tenant; it can never widen beyond it, because the organisation
     predicate is joined unconditionally.
     """
-    query_vector = rag.embed_text(query)
+    if not 1 <= top_k <= 200:
+        raise ValueError("top_k must be between 1 and 200")
+    # Encode before opening a read transaction; remote/local inference may be slow.
+    query_vector = (
+        (await rag.aembed_texts([query]))[0]
+        if settings.embedding_provider != "deterministic" or not settings.is_sqlite
+        else None
+    )
+    candidate_k = max(top_k, settings.retrieval_candidate_k)
+    lexical_candidates = []
+    if settings.is_sqlite:
+        lexical_k = (
+            top_k
+            if settings.embedding_provider == "deterministic" and not settings.reranker_model
+            else candidate_k
+        )
+        lexical_candidates = await _sqlite_lexical_candidates(db, org_id, query, kb_ids, lexical_k)
+        if settings.embedding_provider == "deterministic":
+            return lexical_candidates
     stmt = (
         select(DocumentChunk, Document.filename, Document.source_url)
         .join(Document, Document.id == DocumentChunk.document_id)
@@ -121,20 +210,75 @@ async def search_knowledge(
     if kb_ids:
         stmt = stmt.where(KnowledgeBase.id.in_(kb_ids))
 
+    if not settings.is_sqlite:
+        terms = sorted(set(re.findall(r"[a-z0-9_]+", query.lower())))
+        if terms:
+            query_terms = func.to_tsquery(text("'simple'"), " | ".join(terms))
+            document_terms = func.to_tsvector(text("'simple'"), DocumentChunk.content)
+            lexical_rows = (
+                await db.execute(
+                    stmt.where(document_terms.op("@@")(query_terms))
+                    .order_by(func.ts_rank_cd(document_terms, query_terms).desc())
+                    .limit(candidate_k)
+                )
+            ).all()
+            lexical_candidates = [
+                {
+                    "chunk_id": chunk.id,
+                    "content": chunk.content,
+                    "filename": filename,
+                    "source_url": source_url,
+                    "score": 1 / (rank + 1),
+                }
+                for rank, (chunk, filename, source_url) in enumerate(lexical_rows)
+            ]
+
     # Let pgvector do the coarse nearest-neighbour scan when a real vector
     # column is present. The Python pass below adds lexical overlap.
-    if getattr(DocumentChunk, "__table_args__", ()) and not settings.is_sqlite:
-        if hasattr(DocumentChunk.embedding, "cosine_distance"):
-            stmt = stmt.order_by(DocumentChunk.embedding.cosine_distance(query_vector)).limit(
-                top_k * 4
-            )
+    if settings.embedding_provider != "deterministic":
+        stmt = stmt.where(
+            DocumentChunk.embedding.is_not(None),
+            DocumentChunk.metadata_json["embedding_identity"].as_string()
+            == rag.embedding_identity(),
+        )
+    if (
+        getattr(DocumentChunk, "__table_args__", ())
+        and not settings.is_sqlite
+        and hasattr(DocumentChunk.embedding, "cosine_distance")
+    ):
+        stmt = stmt.order_by(DocumentChunk.embedding.cosine_distance(query_vector)).limit(
+            candidate_k
+        )
 
     rows = (await db.execute(stmt)).all()
     if not rows:
-        return []
+        return lexical_candidates
 
+    vector_candidates = await asyncio.to_thread(
+        _rank_vector_candidates, query, query_vector, rows, candidate_k
+    )
+    if settings.embedding_provider == "deterministic":
+        return vector_candidates[:candidate_k]
+    # Each retriever contributes candidates independently, so lexical matches survive the vector gate.
+    return rag.fuse_rankings([lexical_candidates, vector_candidates], candidate_k)
+
+
+async def search_knowledge(
+    db: AsyncSession,
+    org_id: str,
+    query: str,
+    kb_ids: list[str],
+    top_k: int = 5,
+) -> list[dict[str, Any]]:
+    candidates = await _retrieve_candidates(db, org_id, query, kb_ids, top_k)
+    return await rag.arerank(query, candidates, top_k)
+
+
+def _rank_vector_candidates(query, query_vector, rows, top_k):
     embeddings = [
-        chunk.embedding or rag.deterministic_embedding(chunk.content, settings.embedding_dimensions)
+        chunk.embedding
+        if chunk.embedding is not None
+        else rag.deterministic_embedding(chunk.content, settings.embedding_dimensions)
         for chunk, _, _ in rows
     ]
     vector_scores = rag.cosine_similarity_batch(query_vector, embeddings)
@@ -145,7 +289,9 @@ async def search_knowledge(
             # Exact operational identifiers (401, refund ID, p95) carry more
             # signal than topical similarity, so lexical overlap is weighted
             # heavily. See services/rag.py for the weight rationale.
-            "score": rag.hybrid_score(query, chunk.content, vector_score),
+            "score": rag.hybrid_score(query, chunk.content, vector_score)
+            if settings.embedding_provider == "deterministic"
+            else vector_score,
             "filename": filename,
             "source_url": source_url,
             "chunk_id": chunk.id,
@@ -164,18 +310,15 @@ async def search_knowledge(
 
 
 @lru_cache(maxsize=1)
-def _compiled_answer_graph() -> Any:
-    """Compile the model graph once per worker process."""
+def _answer_model() -> Any:
     from langchain_openai import ChatOpenAI
-    from langgraph.graph import END, START, StateGraph
-
-    class State(TypedDict):
-        messages: list[Any]
 
     model_kwargs: dict[str, Any] = {
         "model": settings.llm_model,
         "api_key": settings.llm_api_key,
         "temperature": 0,
+        "timeout": 30,
+        "max_retries": 1,
     }
     if settings.llm_base_url:
         model_kwargs["base_url"] = settings.llm_base_url
@@ -183,7 +326,18 @@ def _compiled_answer_graph() -> Any:
         model_kwargs["use_responses_api"] = True
         if settings.openai_reasoning_effort:
             model_kwargs["reasoning_effort"] = settings.openai_reasoning_effort
-    model = ChatOpenAI(**model_kwargs)
+    return ChatOpenAI(**model_kwargs)
+
+
+@lru_cache(maxsize=1)
+def _compiled_answer_graph() -> Any:
+    """Compile the model graph once per worker process."""
+    from langgraph.graph import END, START, StateGraph
+
+    class State(TypedDict):
+        messages: list[Any]
+
+    model = _answer_model()
 
     async def answer_node(state: State) -> State:
         response = await model.ainvoke(state["messages"])
@@ -221,21 +375,39 @@ async def _answer(prompt: str, context: list[dict[str, Any]]) -> str:
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
 
-            result = await _compiled_answer_graph().ainvoke(
-                {
-                    "messages": [
-                        SystemMessage(content=_ANSWER_SYSTEM_PROMPT),
-                        HumanMessage(content=f"Context:\n{context}\n\nQuestion: {prompt}"),
-                    ]
-                }
-            )
+            messages = [
+                SystemMessage(content=_ANSWER_SYSTEM_PROMPT),
+                HumanMessage(content=f"Context:\n{context}\n\nQuestion: {prompt}"),
+            ]
+            sink = event_sink.get()
+            if sink is not None:
+                pieces = []
+                async for chunk in _answer_model().astream(messages):
+                    content = chunk.content
+                    delta = (
+                        content
+                        if isinstance(content, str)
+                        else "".join(
+                            block.get("text", "") for block in content if isinstance(block, dict)
+                        )
+                    )
+                    if delta:
+                        pieces.append(delta)
+                        await sink({"type": "answer.delta", "text": delta})
+                return "".join(pieces)
+            result = await _compiled_answer_graph().ainvoke({"messages": messages})
             return str(result["messages"][-1].content)
         except Exception:
             logger.exception("model call failed; falling back to deterministic answer")
+            sink = event_sink.get()
+            if sink is not None:
+                await sink({"type": "answer.reset"})
 
     if context:
         return _format_grounded_answer(prompt, context)
-    return "我暂时没有检索到对应的运行手册。你可以先问退款时效、401/429 接口排查，或补充更多业务背景。"
+    return (
+        "我暂时没有检索到对应的运行手册。你可以先问退款时效、401/429 接口排查，或补充更多业务背景。"
+    )
 
 
 def _sentences(content: str) -> list[str]:
@@ -356,24 +528,15 @@ def _compute_action(prompt: str) -> tuple[str, str, dict[str, Any] | None]:
     return intent.name, risk_tier, action
 
 
-async def _retrieve_node_factory(db: AsyncSession) -> Any:
-    async def retrieve(state: AgentState) -> AgentState:
-        context = await search_knowledge(
-            db, state["org_id"], state["prompt"], state.get("kb_ids") or []
+async def _retrieve_node(state: AgentState) -> AgentState:
+    async with SessionLocal() as retrieval_db:
+        candidates = await _retrieve_candidates(
+            retrieval_db, state["org_id"], state["prompt"], state.get("kb_ids") or []
         )
-        await publish_event(
-            state["run_id"], {"type": "retrieval.completed", "count": len(context)}
-        )
-        intent, risk_tier, action = _compute_action(state["prompt"])
-        return {
-            **state,
-            "context": context,
-            "intent": intent,
-            "risk_tier": risk_tier,
-            "action": action,
-        }
-
-    return retrieve
+    context = await rag.arerank(state["prompt"], candidates, 5)
+    await publish_event(state["run_id"], {"type": "retrieval.completed", "count": len(context)})
+    intent, risk_tier, action = _compute_action(state["prompt"])
+    return {**state, "context": context, "intent": intent, "risk_tier": risk_tier, "action": action}
 
 
 async def _answer_node(state: AgentState) -> AgentState:
@@ -385,6 +548,11 @@ async def _gate_node(state: AgentState) -> AgentState:
     # row. Keeping graph execution free of commits means a retry cannot leave a
     # half-written run behind.
     return state
+
+
+@lru_cache(maxsize=1)
+def _compiled_agent_graph() -> Any:
+    return build_agent_graph(retrieve=_retrieve_node, answer=_answer_node, gate=_gate_node)
 
 
 # ---------------------------------------------------------------------------
@@ -410,101 +578,114 @@ async def start_run(
     idempotency_key: str | None = None,
 ) -> RunResult:
     """Execute the graph and return either an answer or a pending approval."""
-
-    async def _execute() -> dict[str, Any]:
-        run = AgentRun(
-            org_id=principal.org_id,
-            user_id=principal.user_id,
-            prompt=prompt,
-            status=RunStatus.RUNNING.value,
-        )
-        db.add(run)
-        await db.flush()
-
-        await publish_event(
-            run.id, {"type": "run.started", "run_id": run.id, "trace_id": run.trace_id}
-        )
-
-        graph = build_agent_graph(
-            retrieve=await _retrieve_node_factory(db),
-            answer=_answer_node,
-            gate=_gate_node,
-        )
-        final: AgentState = await graph.ainvoke(
-            {"prompt": prompt, "org_id": principal.org_id, "user_id": principal.user_id,
-             "kb_ids": kb_ids, "run_id": run.id}
-        )
-
-        context = final.get("context") or []
-        run.intent = final.get("intent")
-        run.risk_tier = final.get("risk_tier")
-        run.context_chunk_ids = [str(item["chunk_id"]) for item in context]
-        run.input_tokens = _estimate_tokens(
-            prompt + " ".join(str(item["content"]) for item in context)
-        )
-
-        action = final.get("action")
-        if action:
-            risk_tier = final.get("risk_tier") or "medium"
-            approval = ApprovalRequest(
-                run_id=run.id,
-                org_id=principal.org_id,
-                requested_by=principal.user_id,
-                tool_name=str(action["tool_name"]),
-                arguments=dict(action["arguments"]),
-                risk_tier=risk_tier,
-                required_approvals=required_approvals(risk_tier),
-                idempotency_key=idempotency_key or await idempotency_key_for(
-                    principal.org_id, principal.user_id, prompt
-                ),
+    payload = {"org": principal.org_id, "user": principal.user_id, "prompt": prompt, "kb": kb_ids}
+    response: dict[str, Any] | None = None
+    replayed = False
+    if idempotency_key:
+        with db.no_autoflush:
+            existing = await db.scalar(
+                select(IdempotencyRecord).where(
+                    IdempotencyRecord.org_id == principal.org_id,
+                    IdempotencyRecord.scope == "agent.run",
+                    IdempotencyRecord.key == idempotency_key,
+                )
             )
-            run.status = RunStatus.WAITING_APPROVAL.value
-            db.add(approval)
-            await db.flush()
+        if existing is not None and existing.response_json:
+            if existing.request_hash != fingerprint(payload):
+                raise ConflictError(
+                    message="idempotency key was already used with a different payload"
+                )
+            response, replayed = dict(existing.response_json), True
+
+    if response is None:
+
+        async def _execute() -> dict[str, Any]:
+            # Only authorization decisions exist here; business rows are staged after the graph.
+            if db.in_transaction():
+                await db.commit()
+            # Only the reservation owner may spend time on retrieval/model calls.
+            run = AgentRun(
+                id=new_id(),
+                trace_id=new_id(),
+                org_id=principal.org_id,
+                user_id=principal.user_id,
+                prompt=prompt,
+                status=RunStatus.RUNNING.value,
+            )
             await publish_event(
                 run.id,
-                {
-                    "type": "approval.required",
-                    "approval_id": approval.id,
-                    "tool": approval.tool_name,
-                    "risk_tier": approval.risk_tier,
-                    "required_approvals": approval.required_approvals,
-                },
+                {"type": "run.started", "run_id": run.id, "trace_id": run.trace_id},
             )
-            await db.commit()
+            graph = _compiled_agent_graph()
+            with db.no_autoflush:
+                final: AgentState = await graph.ainvoke(
+                    {
+                        "prompt": prompt,
+                        "org_id": principal.org_id,
+                        "user_id": principal.user_id,
+                        "kb_ids": kb_ids,
+                        "run_id": run.id,
+                    }
+                )
+
+            db.add(run)
+            await db.flush()
+
+            context = final.get("context") or []
+            run.intent = final.get("intent")
+            run.risk_tier = final.get("risk_tier")
+            run.context_chunk_ids = [str(item["chunk_id"]) for item in context]
+            run.input_tokens = _estimate_tokens(
+                prompt + " ".join(str(item["content"]) for item in context)
+            )
+
+            action = final.get("action")
+            if action:
+                risk_tier = final.get("risk_tier") or "medium"
+                approval = ApprovalRequest(
+                    run_id=run.id,
+                    org_id=principal.org_id,
+                    requested_by=principal.user_id,
+                    tool_name=str(action["tool_name"]),
+                    arguments=dict(action["arguments"]),
+                    risk_tier=risk_tier,
+                    required_approvals=required_approvals(risk_tier),
+                    idempotency_key=idempotency_key
+                    or await idempotency_key_for(principal.org_id, principal.user_id, prompt),
+                )
+                run.status = RunStatus.WAITING_APPROVAL.value
+                db.add(approval)
+                await db.flush()
+                return {
+                    "run_id": run.id,
+                    "approval_id": approval.id,
+                    "status": run.status,
+                    "trace_id": run.trace_id,
+                }
+
+            run.answer = final.get("answer")
+            run.output_tokens = _estimate_tokens(run.answer or "")
+            run.estimated_cost_usd = _cost(run.input_tokens, run.output_tokens)
+            run.status = RunStatus.SUCCEEDED.value
+            run.updated_at = utcnow()
+            db.add(_usage_event(run))
             return {
                 "run_id": run.id,
-                "approval_id": approval.id,
+                "approval_id": None,
                 "status": run.status,
                 "trace_id": run.trace_id,
             }
 
-        run.answer = final.get("answer")
-        run.output_tokens = _estimate_tokens(run.answer or "")
-        run.estimated_cost_usd = _cost(run.input_tokens, run.output_tokens)
-        run.status = RunStatus.SUCCEEDED.value
-        run.updated_at = utcnow()
-        db.add(_usage_event(run))
-        await db.commit()
-        await publish_event(
-            run.id, {"type": "run.completed", "status": run.status, "answer": run.answer}
+        response, replayed = await replay_or_execute(
+            db,
+            org_id=principal.org_id,
+            scope="agent.run",
+            key=idempotency_key,
+            payload=payload,
+            execute=_execute,
+            release_reservation=True,
         )
-        return {
-            "run_id": run.id,
-            "approval_id": None,
-            "status": run.status,
-            "trace_id": run.trace_id,
-        }
-
-    payload = {"org": principal.org_id, "user": principal.user_id, "prompt": prompt, "kb": kb_ids}
-    response, replayed = await replay_or_execute(
-        db,
-        org_id=principal.org_id,
-        scope="agent.run",
-        key=idempotency_key,
-        payload=payload,
-        execute=_execute,
-    )
+    await db.commit()
 
     run = await db.get(AgentRun, response["run_id"])
     if run is None:  # pragma: no cover - only if the row was purged mid-request
@@ -512,6 +693,22 @@ async def start_run(
     approval = None
     if response.get("approval_id"):
         approval = await db.get(ApprovalRequest, response["approval_id"])
+    await db.commit()
+    if not replayed and approval is not None:
+        await publish_event(
+            run.id,
+            {
+                "type": "approval.required",
+                "approval_id": approval.id,
+                "tool": approval.tool_name,
+                "risk_tier": approval.risk_tier,
+                "required_approvals": approval.required_approvals,
+            },
+        )
+    if not replayed and run.status == RunStatus.SUCCEEDED.value:
+        await publish_event(
+            run.id, {"type": "run.completed", "status": run.status, "answer": run.answer}
+        )
     return RunResult(run=run, approval=approval, replayed=replayed)
 
 
@@ -605,8 +802,10 @@ async def record_vote(
         raise ConflictError(message="the requester cannot approve their own request")
 
     existing_votes = (
-        await db.execute(select(ApprovalVote).where(ApprovalVote.approval_id == approval.id))
-    ).scalars().all()
+        (await db.execute(select(ApprovalVote).where(ApprovalVote.approval_id == approval.id)))
+        .scalars()
+        .all()
+    )
     if any(vote.voter_id == principal.user_id for vote in existing_votes):
         raise ConflictError(message="you have already voted on this approval")
 
@@ -631,8 +830,11 @@ async def record_vote(
     )
 
     approve_votes = [v for v in existing_votes if v.decision == ApprovalStatus.APPROVED.value]
-    approve_votes.append(ApprovalVote(approval_id=approval.id, voter_id=principal.user_id,
-                                      decision=decision, note=note))
+    approve_votes.append(
+        ApprovalVote(
+            approval_id=approval.id, voter_id=principal.user_id, decision=decision, note=note
+        )
+    )
 
     # A single rejection is terminal: a payment operation should not proceed
     # because enough other people said yes.
@@ -642,7 +844,9 @@ async def record_vote(
         await _finish_rejected(db, approval, principal)
         return approval, False
 
-    granted = {vote.voter_id for vote in approve_votes if vote.decision == ApprovalStatus.APPROVED.value}
+    granted = {
+        vote.voter_id for vote in approve_votes if vote.decision == ApprovalStatus.APPROVED.value
+    }
     if len(granted) < approval.required_approvals:
         await publish_event(
             approval.run_id,
@@ -675,8 +879,7 @@ async def _finish_rejected(
         db.add(_usage_event(run))
     await publish_event(
         approval.run_id,
-        {"type": "approval.rejected", "approval_id": approval.id,
-         "decided_by": principal.user_id},
+        {"type": "approval.rejected", "approval_id": approval.id, "decided_by": principal.user_id},
     )
     await db.commit()
 
@@ -722,9 +925,8 @@ async def _execute_approved(
     approval.executed_at = utcnow()
 
     if approval.tool_name == "create_ticket":
-        run.answer = (
-            f"已创建工单 {result['ticket_id']}：{approval.arguments.get('title', '')}"
-            + ("（幂等重放）" if replayed else "")
+        run.answer = f"已创建工单 {result['ticket_id']}：{approval.arguments.get('title', '')}" + (
+            "（幂等重放）" if replayed else ""
         )
     else:
         run.answer = f"工单 {result['ticket_id']} 已更新为 {result['ticket_status']}。"
@@ -746,8 +948,12 @@ async def _execute_approved(
     )
     await publish_event(
         run.id,
-        {"type": "tool.completed", "tool": approval.tool_name, "result": result,
-         "replayed": replayed},
+        {
+            "type": "tool.completed",
+            "tool": approval.tool_name,
+            "result": result,
+            "replayed": replayed,
+        },
     )
     await publish_event(
         run.id, {"type": "run.completed", "status": run.status, "answer": run.answer}

@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 import jwt
-from fastapi import Depends, Header, Query, Request, WebSocket, WebSocketException, status
+from fastapi import Depends, Header, Request, WebSocket
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,7 +41,8 @@ logger = logging.getLogger(__name__)
 # consistent JSON body with a WWW-Authenticate header.
 _bearer = HTTPBearer(auto_error=False, description="JWT access token")
 
-Db = Annotated[AsyncSession, Depends(get_db)]
+# Finish transactions and audits before a client can start its next request.
+Db = Annotated[AsyncSession, Depends(get_db, scope="function")]
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +223,7 @@ def require(action: Action, resource: Resource):
             org_id=principal.org_id,
             actor_id=principal.user_id,
             trace_id=trace_id,
+            defer_until_close=action == Action.READ and request.method == "GET",
         )
         return principal
 

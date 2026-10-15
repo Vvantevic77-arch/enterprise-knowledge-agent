@@ -13,9 +13,9 @@
   "chunking": {
     "documents": 240,
     "chunks": 960,
-    "elapsed_ms": 5.138,
-    "documents_per_second": 46710.03,
-    "mb_per_second": 62.88
+    "elapsed_ms": 9.15,
+    "documents_per_second": 26228.31,
+    "mb_per_second": 35.31
   },
   "incremental_index": {
     "initial_documents": 240,
@@ -63,14 +63,14 @@
   },
   "search_ab": {
     "queries": 40,
-    "baseline_p50_ms": 46.014,
-    "baseline_p95_ms": 46.736,
-    "optimized_p50_ms": 32.125,
-    "optimized_p95_ms": 32.809,
-    "p95_latency_reduction": 0.298,
-    "baseline_throughput_requests_per_second": 21.48,
-    "optimized_throughput_requests_per_second": 31.07,
-    "throughput_improvement": 0.4462
+    "baseline_p50_ms": 78.635,
+    "baseline_p95_ms": 79.0,
+    "optimized_p50_ms": 49.576,
+    "optimized_p95_ms": 49.748,
+    "p95_latency_reduction": 0.3703,
+    "baseline_throughput_requests_per_second": 12.72,
+    "optimized_throughput_requests_per_second": 20.17,
+    "throughput_improvement": 0.5862
   },
   "policy": {
     "safe_prompts": 240,
@@ -81,30 +81,30 @@
     "approval_gate_coverage": 1.0
   },
   "concurrency": {
-    "requests_per_level": 40,
+    "requests_per_level": 100,
     "levels": {
       "1": {
-        "requests": 40,
-        "p50_ms": 32.122,
-        "p95_ms": 33.511,
-        "p99_ms": 35.443,
-        "throughput_requests_per_second": 30.92
+        "requests": 100,
+        "p50_ms": 49.632,
+        "p95_ms": 50.05,
+        "p99_ms": 50.788,
+        "throughput_requests_per_second": 20.13
       },
       "10": {
-        "requests": 40,
-        "p50_ms": 164.058,
-        "p95_ms": 428.982,
-        "p99_ms": 550.299,
-        "throughput_requests_per_second": 30.75
+        "requests": 100,
+        "p50_ms": 420.294,
+        "p95_ms": 805.779,
+        "p99_ms": 933.483,
+        "throughput_requests_per_second": 20.09
       },
       "50": {
-        "requests": 40,
-        "p50_ms": 113.401,
-        "p95_ms": 205.485,
-        "p99_ms": 242.614,
-        "throughput_requests_per_second": 30.93
+        "requests": 100,
+        "p50_ms": 302.318,
+        "p95_ms": 646.354,
+        "p99_ms": 817.083,
+        "throughput_requests_per_second": 20.07
       }
     }
   },
-  "generated_at_utc": "2026-09-07T13:07:18.863889+00:00"
+  "generated_at_utc": "2026-10-12T02:14:40.454472+00:00"
 }

@@ -12,9 +12,10 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AuditLog
+from app.models import AuditLog, utcnow
 
 logger = logging.getLogger(__name__)
+DEFERRED_READ_AUDITS_KEY = "deferred_read_audits"
 
 #: Actions that represent an authorisation decision rather than a mutation.
 DECISION_ACTIONS = {"access.allowed", "access.denied", "approval.vote", "approval.executed"}
@@ -32,11 +33,12 @@ def record(
     reason: str = "",
     trace_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    defer_until_close: bool = False,
 ) -> AuditLog:
-    """Stage an audit row on the session.
+    """Stage an audit row on the session or defer a read decision until close.
 
-    Deliberately does not commit: the row lands in the same transaction as the
-    change it describes, so the two cannot diverge.
+    Mutation rows stay in the business transaction. Read decisions are written
+    after its read transaction ends, so they do not turn reads into writers.
     """
     entry = AuditLog(
         org_id=org_id,
@@ -48,8 +50,12 @@ def record(
         reason=reason[:255],
         trace_id=trace_id,
         metadata_json=metadata or {},
+        created_at=utcnow(),
     )
-    db.add(entry)
+    if defer_until_close:
+        db.info.setdefault(DEFERRED_READ_AUDITS_KEY, []).append(entry)
+    else:
+        db.add(entry)
     return entry
 
 

@@ -1,12 +1,13 @@
 """Chunking, embeddings, hybrid scoring, and text extraction.
 
-Two embedding backends share one interface:
+Embedding backends share one interface:
 
 * ``deterministic`` — a SHA-256 derived pseudo-vector. It is reproducible, needs
   no network, and keeps the offline benchmark and test suite hermetic. It is
   **not** semantic: near-synonymous text hashes to unrelated vectors.
 * ``openai`` — real embeddings from OpenAI or any OpenAI-compatible gateway
-  (set ``OPENAI_BASE_URL``). This is what should be used in production.
+  (set ``OPENAI_BASE_URL``).
+* ``sentence_transformers`` — optional local semantic model with a pinned revision.
 
 The hybrid scorer deliberately weights lexical overlap heavily. Payment
 operations questions turn on exact tokens — ``401``, ``429``, ``refund ID``,
@@ -17,11 +18,15 @@ re-running ``evals/benchmark.py`` and updating the reported numbers.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
+import json
 import math
 import re
+import threading
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from app.config import settings
@@ -90,6 +95,64 @@ def deterministic_embedding(text: str, dimensions: int = 1536) -> list[float]:
     return [value / norm for value in values]
 
 
+@lru_cache(maxsize=1)
+def _embedding_client():
+    from openai import OpenAI
+
+    return OpenAI(
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+        timeout=30,
+        max_retries=1,
+    )
+
+
+_encoder_lock = threading.Lock()
+_reranker_lock = threading.Lock()
+
+
+@lru_cache(maxsize=1)
+def _sentence_encoder(model: str, revision: str | None, device: str):
+    from sentence_transformers import SentenceTransformer
+
+    return SentenceTransformer(model, revision=revision, device=device, trust_remote_code=False)
+
+
+@lru_cache(maxsize=1)
+def _cross_encoder(model: str, revision: str | None, device: str):
+    from sentence_transformers import CrossEncoder
+
+    return CrossEncoder(model, revision=revision, device=device, trust_remote_code=False)
+
+
+def embedding_identity() -> str:
+    """Only vectors from the same provider/model/revision/dimension may be compared."""
+    provider = settings.embedding_provider.replace("openai_compatible", "openai")
+    spec: dict[str, str | int | None] = {
+        "provider": provider,
+        "dimensions": settings.embedding_dimensions,
+    }
+    if provider != "deterministic":
+        spec.update(model=settings.embedding_model, revision=settings.embedding_revision)
+        if provider == "openai":
+            spec["base_url"] = settings.openai_base_url
+    return hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
+
+
+def _validate_embeddings(vectors: list[list[float]], count: int) -> list[list[float]]:
+    if len(vectors) != count:
+        raise ValueError("embedding provider returned an unexpected number of vectors")
+    result = []
+    for vector in vectors:
+        if len(vector) != settings.embedding_dimensions or not all(map(math.isfinite, vector)):
+            raise ValueError("embedding dimensions or values do not match configuration")
+        norm = math.sqrt(sum(value * value for value in vector))
+        if not math.isfinite(norm) or norm == 0:
+            raise ValueError("embedding provider returned a zero or invalid vector")
+        result.append([value / norm for value in vector])
+    return result
+
+
 def embed_texts(texts: list[str]) -> list[list[float]]:
     """Embed a batch of texts using the configured provider."""
     if not texts:
@@ -97,23 +160,91 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     if settings.embedding_provider == "deterministic":
         return [deterministic_embedding(text, settings.embedding_dimensions) for text in texts]
 
-    if settings.embedding_provider in {"openai", "openai_compatible"}:
-        from openai import OpenAI
+    if settings.embedding_provider == "sentence_transformers":
+        with _encoder_lock:
+            encoder = _sentence_encoder(
+                settings.embedding_model, settings.embedding_revision, settings.retrieval_device
+            )
+            vectors = encoder.encode(
+                texts, batch_size=32, normalize_embeddings=True, show_progress_bar=False
+            ).tolist()
+        return _validate_embeddings(vectors, len(texts))
 
-        client_kwargs: dict[str, object] = {}
-        if settings.openai_api_key:
-            client_kwargs["api_key"] = settings.openai_api_key
-        if settings.openai_base_url:
-            client_kwargs["base_url"] = settings.openai_base_url
-        client = OpenAI(**client_kwargs)  # type: ignore[arg-type]
-        response = client.embeddings.create(model=settings.embedding_model, input=texts)
-        return [item.embedding for item in response.data]
+    if settings.embedding_provider in {"openai", "openai_compatible"}:
+        response = _embedding_client().embeddings.create(
+            model=settings.embedding_model, input=texts
+        )
+        return _validate_embeddings(
+            [item.embedding for item in sorted(response.data, key=lambda item: item.index)],
+            len(texts),
+        )
 
     raise ValueError(f"unknown embedding provider: {settings.embedding_provider}")
 
 
 def embed_text(text: str) -> list[float]:
     return embed_texts([text])[0]
+
+
+async def aembed_texts(texts: list[str]) -> list[list[float]]:
+    """Keep provider I/O and deterministic vector construction off the event loop."""
+    return await asyncio.to_thread(embed_texts, texts)
+
+
+def fuse_rankings(rankings: list[list[dict]], limit: int) -> list[dict]:
+    merged = {}
+    for ranking in rankings:
+        seen = set()
+        for rank, item in enumerate(ranking):
+            if item["chunk_id"] in seen:
+                continue
+            seen.add(item["chunk_id"])
+            candidate = merged.setdefault(item["chunk_id"], {**item, "score": 0.0})
+            candidate["score"] += 1 / (60 + rank + 1)
+    return sorted(merged.values(), key=lambda item: item["score"], reverse=True)[:limit]
+
+
+def rerank(query: str, candidates: list[dict], top_k: int) -> list[dict]:
+    if not candidates or not settings.reranker_model:
+        return candidates[:top_k]
+    with _reranker_lock:
+        model = _cross_encoder(
+            settings.reranker_model, settings.reranker_revision, settings.retrieval_device
+        )
+        scores = model.predict(
+            [(query, item["content"]) for item in candidates],
+            batch_size=32,
+            show_progress_bar=False,
+        )
+    if len(scores) != len(candidates) or not all(math.isfinite(float(score)) for score in scores):
+        raise ValueError("reranker returned invalid scores")
+    return sorted(
+        [{**item, "score": float(score)} for item, score in zip(candidates, scores, strict=True)],
+        key=lambda item: item["score"],
+        reverse=True,
+    )[:top_k]
+
+
+async def arerank(query: str, candidates: list[dict], top_k: int) -> list[dict]:
+    if not candidates or not settings.reranker_model:
+        return candidates[:top_k]
+    return await asyncio.to_thread(rerank, query, candidates, top_k)
+
+
+def close_embedding_client() -> None:
+    if _embedding_client.cache_info().currsize:
+        _embedding_client().close()
+        _embedding_client.cache_clear()
+    _sentence_encoder.cache_clear()
+    _cross_encoder.cache_clear()
+
+
+def cjk_index_text(value: str) -> str:
+    return " ".join(
+        run[index : index + 2]
+        for run in re.findall(r"[一-鿿]+", value)
+        for index in range(len(run) - 1)
+    )
 
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:
